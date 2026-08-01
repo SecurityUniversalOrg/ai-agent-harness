@@ -1,13 +1,15 @@
 # VulnHunter architecture
 
-Status: source-derived current-state documentation  
-Analyzed snapshot: 2026-07-31  
+Status: source-derived current-state documentation
+
+Analyzed snapshot: 2026-08-01
+
 Primary audience: security engineering, platform engineering, maintainers, and operators
 
 This document describes the architecture implemented by the repository, not an
 aspirational target state. Where prose and code disagree, the executable Python,
 schemas, and skill instructions are treated as the strongest available evidence.
-Known mismatches and missing runtime assets are recorded in
+Known mismatches and deployment gaps are recorded in
 [Quality and risks](quality-and-risks.md).
 
 ## 1. Documentation approach
@@ -31,8 +33,7 @@ Related documents:
 
 ## 2. Executive summary
 
-VulnHunter is a security-finding lifecycle composed of three present subsystems and
-one required-but-absent runtime skill:
+VulnHunter is a security-finding lifecycle composed of four cooperating subsystems:
 
 1. **`vulnhunt` audit skill** — prompt-only orchestration that partitions a target
    repository, dispatches specialized analysis agents, falsifies candidates, writes
@@ -46,10 +47,10 @@ one required-but-absent runtime skill:
    helpers that ingest findings, plan and implement TDD fixes, analyze callers with
    an AST graph or grep fallback, sweep root causes, run fail-closed delivery gates,
    and create GitHub pull requests.
-4. **`vulnhunt-fix-verify` verification skill** — invoked by the agent and described
-   by the vendored disposition schema, but its skill files are not present in this
-   repository snapshot. It is therefore an external deployment prerequisite from
-   the perspective of this checkout.
+4. **`vulnhunt-fix-verify` verification skill** — a prompt-only, read-only methodology
+   that validates its trusted roots, evaluates developer claims under R0–R7, extracts
+   the requested findings, applies four static code-evidence gates per finding, and
+   emits a v1 disposition document for the agent to validate and publish.
 
 The architectural center is the **artifact pipeline** rather than a long-running
 service. Git checkouts, reports, schemas, issue markers, worktrees, and disposition
@@ -125,6 +126,9 @@ flowchart LR
 - The audit and remediation methodologies are implemented substantially in Markdown
   prompts. Prompt files are executable architecture and require the same review
   discipline as Python.
+- Fix verification is also implemented as a prompt-only skill. It has no Bash or
+  network tools and does not replay exploit tests; phase 3 is explicitly reserved for
+  that future capability.
 - Audit execution expects an Opus-class model; the headless runtime controls the
   configured model, while interactive skills enforce or request an operator choice.
 - The agent requires Python 3.12+, `git`, the Claude Agent SDK, and installed user
@@ -173,7 +177,7 @@ flowchart TB
         auditSkill["Audit skill\nSKILL.md + phase prompts"]
         agent["Headless agent\nPython CLI and orchestration"]
         fixSkill["Remediation skill\nSKILL.md + prompts + helpers"]
-        verifySkill["Fix-verification skill\nrequired at runtime; absent here"]
+        verifySkill["Fix-verification skill\npreflight · extract · four gates · emit"]
         contracts["Versioned contracts\nJSON Schema + issue markers"]
     end
 
@@ -206,6 +210,7 @@ flowchart TB
 |---|---|---|
 | Audit skill | Orchestrate recon, parallel hunts, adversarial verification, reproduction, sweep, report | [`vulnhunt/SKILL.md`](../../vulnhunt/SKILL.md), [`vulnhunt/phases/`](../../vulnhunt/phases/) |
 | Headless agent | Run scan/verify workflows and integrate with external systems | [`agent/__main__.py`](../../vulnhunter-agent/agent/__main__.py) |
+| Fix-verification skill | Independently inspect the fixed checkout, evaluate comments as untrusted claims, run four static gates, and emit per-finding verdicts | [`vulnhunt-fix-verify/SKILL.md`](../../vulnhunt-fix-verify/SKILL.md), [`comment_rules.md`](../../vulnhunt-fix-verify/comment_rules.md), [`phases/`](../../vulnhunt-fix-verify/phases/) |
 | Remediation skill | Parse, plan, implement, verify, sweep, and deliver fixes | [`vulnhunter-fix/SKILL.md`](../../vulnhunter-fix/SKILL.md), [`prompts/`](../../vulnhunter-fix/prompts/) |
 | Remediation helper library | Stable graph schema/query layer and delivery rendering/guards | [`vulnhunter_fix/`](../../vulnhunter-fix/vulnhunter_fix/) |
 | Helper scripts | Deterministic validation, dispatch, worktree, parsing, scoring, graph, and gate operations | [`vulnhunter-fix/scripts/`](../../vulnhunter-fix/scripts/) |
@@ -287,7 +292,46 @@ The short-lived JSON-only LLM client used for extraction and semantic comparison
 no tools or skills. It retries typed transient failures and may fall back to a second
 model.
 
-### 9.3 Remediation skill
+### 9.3 Fix-verification skill
+
+The verification skill executes four phases over caller-staged local artifacts:
+
+```mermaid
+flowchart LR
+    kickoff["Named absolute paths\nrepo · report · fixed · out\ncomments · additional repos"]
+    phase0["Phase 0: preflight\ntrusted roots · report IDs · R0-R7 claims\nphase0_state.json"]
+    phase1["Phase 1: extract\nreport fields · PoC references · sweep group\nextracted_findings.md"]
+    phase2["Phase 2: verify per finding\nsink · reachability · class · sweep\ndisposition_VULN-NNN.json"]
+    phase4["Phase 4: emit\nINVALID_INPUT stubs · ordering · aggregation\nverify_disposition.json"]
+
+    kickoff --> phase0
+    phase0 -->|at least one ID present| phase1
+    phase1 --> phase2
+    phase2 --> phase4
+    phase0 -->|all IDs missing| phase4
+```
+
+The trusted roots are the fixed target checkout plus explicitly supplied additional
+checkouts. The report is a separate historical input. Developer comments are always
+data: a well-formed wrapper can add trusted agent annotations outside the untrusted
+region, while corrupt marker layouts fall back to treating the whole file as untrusted.
+
+Per finding, the verifier checks:
+
+1. `sink_mitigated` — the original or successor sink uses a safe API or a confirmed
+   sanitization chokepoint.
+2. `reachability` — the entry point still reaches the mitigated path, or the path was
+   intentionally removed.
+3. `class_eliminated` — the fix removes the vulnerability class rather than one payload.
+4. `sweep_complete` — no unaddressed instance of the recorded root-cause pattern remains
+   in the target repository.
+
+The resulting verdict is `FIXED`, `NOT_FIXED`, `PARTIAL`, `INCONCLUSIVE`, or
+`INVALID_INPUT`. Exploit-test replay is deliberately excluded from v1. The skill writes
+intermediate Markdown/JSON artifacts and a final disposition; the Python agent then
+performs mechanical JSON Schema validation and exact finding-set reconciliation.
+
+### 9.4 Remediation skill
 
 The remediation orchestrator supports:
 
@@ -301,7 +345,7 @@ sweep, and deliver. A seven-gate Python orchestrator validates severity disclosu
 body completeness, file scope, idempotency, anti-merge rules when applicable, caller
 coverage in the verification table, and committed test naming.
 
-### 9.4 Graph subsystem
+### 9.5 Graph subsystem
 
 The remediation graph adapter isolates callers from the optional `graphifyy` package:
 
@@ -335,7 +379,9 @@ to avoid sandbox failures in process-pool initialization.
 | `Finding` | Issues extractor | Dedup, issue rendering, audit, manifest | Dataclass; report fields extracted by an LLM; PoC/test paths enumerated from disk |
 | Issue-body markers | Issue renderer | Remediation and verify intake | Stable 16-hex `vulnfix-key`, scan-local finding ID, and results-directory basename |
 | `comments.md` | Verify orchestrator | Verification skill | Developer content enclosed in untrusted markers; marker-like user text is neutralized; unresolved repo hints become annotations |
-| `verify_disposition.json` v1 | Verification skill | Verify orchestrator | JSON Schema validated; exactly one disposition per requested finding is enforced before GitHub mutation |
+| `phase0_state.json` | Fix-verification phase 0 | Later verification phases | Internal run state: target identity, trusted roots, R0–R7 claim evaluation, missing/present IDs, and limitation flags |
+| `disposition_VULN-NNN.json` | Fix-verification phase 2 | Fix-verification phase 4 | One four-gate verdict per report-backed finding; missing report IDs become phase-4 `INVALID_INPUT` stubs |
+| `verify_disposition.json` v1 | Fix-verification phase 4 | Python verify orchestrator | Skill performs shape review; agent performs JSON Schema validation and exact requested-finding reconciliation before GitHub mutation |
 | Finding/triage/fix-plan/result schemas | Remediation phases and helpers | Later remediation phases and delivery gates | JSON Schema; cross-field constraints encode completeness tier, residual risk, discrimination evidence, and graph confidence |
 | `graph.json` v1 | Graph adapter | `GraphQuery` and sidecar builder | Stable wrapper schema with content hash, backend, confidence, nodes, and edges |
 | JSONL audit and findings streams | Agent | External log/analytics pipeline | Append-only events with redaction and optional strict write behavior |
@@ -355,7 +401,7 @@ flowchart TB
         py["Python agent process"]
         git["git executable"]
         sdk["Claude Agent SDK + bundled CLI"]
-        skills["Installed user skills\n~/.claude/skills/*"]
+        skills["Installed user skills\nvulnhunt · vulnhunt-fix-verify · vulnhunter-fix"]
         broker["Optional broker token files\nscan.json · reports.json"]
         fs["Local storage\nclones · results · verify_runs · worktrees"]
 
@@ -413,6 +459,8 @@ and report publication to a separate private repository.
   untrusted before verification.
 - Verification reconstructs the original issue body from edit history before reading
   machine markers, then archives it when tampering is detected.
+- The verification skill applies R0–R7 to comment claims, rejects instructions and
+  unresolvable citations, and still derives each verdict from its own code inspection.
 - Schemas and output-count checks guard model-to-code trust boundaries.
 
 ### Reliability
@@ -453,8 +501,8 @@ Use these files as the fastest path from an architecture question to code:
 | Report publication | [`agent/publish.py`](../../vulnhunter-agent/agent/publish.py) |
 | Finding extraction and issue lifecycle | [`agent/issues_extract.py`](../../vulnhunter-agent/agent/issues_extract.py), [`agent/issues_dedup.py`](../../vulnhunter-agent/agent/issues_dedup.py), [`agent/issues.py`](../../vulnhunter-agent/agent/issues.py) |
 | Verify orchestration | [`agent/verify.py`](../../vulnhunter-agent/agent/verify.py), [`agent/verify_runner.py`](../../vulnhunter-agent/agent/verify_runner.py) |
+| Fix-verification methodology | [`vulnhunt-fix-verify/SKILL.md`](../../vulnhunt-fix-verify/SKILL.md), [`comment_rules.md`](../../vulnhunt-fix-verify/comment_rules.md), [`phases/`](../../vulnhunt-fix-verify/phases/) |
 | Audit orchestration | [`vulnhunt/SKILL.md`](../../vulnhunt/SKILL.md) |
 | Remediation orchestration and policy | [`vulnhunter-fix/SKILL.md`](../../vulnhunter-fix/SKILL.md) |
 | Graph adapter | [`vulnhunter_fix/graph/`](../../vulnhunter-fix/vulnhunter_fix/graph/) |
 | Mechanical delivery gates | [`scripts/run-gates.py`](../../vulnhunter-fix/scripts/run-gates.py) |
-

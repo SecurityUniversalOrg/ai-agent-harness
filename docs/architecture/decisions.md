@@ -21,6 +21,7 @@ history. Maintainers can split them into numbered ADRs if they want an approval 
 | IADR-010 | Treat issue content as untrusted and verify against reconstructed original markers | Observed |
 | IADR-011 | Retry inference only where restart cannot discard useful work | Observed |
 | IADR-012 | Customize deployments through config/env and wrapper processes instead of source forks | Observed |
+| IADR-013 | Verify fixes through four independent static gates and defer exploit replay | Observed |
 
 ## IADR-001: Separate methodology skills from the headless runtime
 
@@ -36,7 +37,8 @@ changes: they can break contracts without a Python type checker and must be cove
 sync/contract tests.
 
 **Evidence.** [`vulnhunt/SKILL.md`](../../vulnhunt/SKILL.md),
-[`vulnhunter-fix/SKILL.md`](../../vulnhunter-fix/SKILL.md), and
+[`vulnhunter-fix/SKILL.md`](../../vulnhunter-fix/SKILL.md),
+[`vulnhunt-fix-verify/SKILL.md`](../../vulnhunt-fix-verify/SKILL.md), and
 [`agent/runner.py`](../../vulnhunter-agent/agent/runner.py).
 
 ## IADR-002: Use filesystem artifacts and schemas as boundaries
@@ -54,6 +56,7 @@ schema versions and prompt/schema drift. Presence-only checks on some Markdown
 artifacts remain weaker than schema validation.
 
 **Evidence.** [`vulnhunt/SKILL.md`](../../vulnhunt/SKILL.md),
+[`vulnhunt-fix-verify/SKILL.md`](../../vulnhunt-fix-verify/SKILL.md),
 [`agent/manifest.py`](../../vulnhunter-agent/agent/manifest.py),
 [`agent/verify_runner.py`](../../vulnhunter-agent/agent/verify_runner.py), and
 [`vulnhunter-fix/references/`](../../vulnhunter-fix/references/).
@@ -69,9 +72,9 @@ visibility and approval lists to the same minimal set, with an optional OS-level
 filesystem/network sandbox.
 
 **Consequences.** Static scans are safer and reproducible, but exploit tests are written
-rather than executed unless an operator explicitly trusts the checkout. The sandbox
-does not constrain the Python orchestrator itself, so deployment isolation is still
-required.
+rather than executed unless an operator explicitly trusts the checkout. Fix verification
+is always Bash-free and static. The sandbox does not constrain the Python orchestrator
+itself, so deployment isolation is still required.
 
 **Evidence.** [`agent/__main__.py`](../../vulnhunter-agent/agent/__main__.py),
 [`agent/runner.py`](../../vulnhunter-agent/agent/runner.py), and
@@ -193,13 +196,16 @@ only from that body, delimit developer prose as untrusted, neutralize marker col
 and resolve additional repositories only through allowed hosts or exact config aliases.
 
 **Consequences.** A developer cannot redirect verification to an arbitrary report or
-clone target merely by editing an issue. The design depends on GitHub edit-history
-availability and on the missing verification skill honoring the documented untrusted
-content convention.
+clone target merely by editing an issue. The skill independently applies R0–R7, treats
+accepted claims only as hints, and adds limitations for rejected instructions or missing
+sources. The design still depends on GitHub edit-history availability and model adherence
+to the trusted-root policy.
 
 **Evidence.** [`agent/verify.py`](../../vulnhunter-agent/agent/verify.py),
 [`agent/verify_extract.py`](../../vulnhunter-agent/agent/verify_extract.py), and
-[`agent/verify_resolve.py`](../../vulnhunter-agent/agent/verify_resolve.py).
+[`agent/verify_resolve.py`](../../vulnhunter-agent/agent/verify_resolve.py),
+[`comment_rules.md`](../../vulnhunt-fix-verify/comment_rules.md), and
+[`phase0_preflight.md`](../../vulnhunt-fix-verify/phases/phase0_preflight.md).
 
 ## IADR-011: Retry only at safe restart boundaries
 
@@ -236,3 +242,22 @@ governance becomes more important than internal Python API stability.
 [`agent/config.py`](../../vulnhunter-agent/agent/config.py), and
 [`scan_manifest.schema.json`](../../vulnhunter-agent/scan_manifest.schema.json).
 
+## IADR-013: Verify through four static gates and defer exploit replay
+
+**Context.** Fix verification consumes an untrusted developer narrative and a potentially
+hostile checkout. Executing historical exploit tests would widen the authority and runtime
+risk of a workflow whose primary purpose is an independent second opinion.
+
+**Decision.** Keep v1 verification static and Bash-free. For every report-backed finding,
+independently inspect sink mitigation, reachability, vulnerability-class elimination, and
+root-cause sweep completeness. Map the evidence to a per-finding verdict and reserve phase
+3 for future exploit-test replay.
+
+**Consequences.** Verification can run with no network and no code execution, supports
+parallel per-finding analysis, and produces concrete `file:line` evidence. It cannot prove
+runtime behavior or replay environment-dependent exploits; ambiguous static traces must
+be `INCONCLUSIVE` rather than assumed safe.
+
+**Evidence.** [`vulnhunt-fix-verify/SKILL.md`](../../vulnhunt-fix-verify/SKILL.md),
+[`phase2_verify.md`](../../vulnhunt-fix-verify/phases/phase2_verify.md), and
+[`phase4_emit.md`](../../vulnhunt-fix-verify/phases/phase4_emit.md).

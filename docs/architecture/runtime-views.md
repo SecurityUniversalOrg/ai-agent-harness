@@ -122,7 +122,7 @@ sequenceDiagram
     participant GH as GitHub REST + GraphQL
     participant FS as contained scratch directory
     participant Reports as report repository
-    participant RefLLM as reference-extraction LLM
+    participant RefLLM as configured-model reference extractor
     participant Git as git clone adapters
     participant SDK as Claude Agent SDK
     participant Skill as /vulnhunt-fix-verify
@@ -146,9 +146,20 @@ sequenceDiagram
         Git-->>FS: read-only additional checkout
     end
     CLI->>FS: write comments.md with untrusted boundaries and unresolved-hint annotations
-    CLI->>SDK: locked read/write/search/Agent session; no Bash
+    CLI->>SDK: locked Read/Write/Edit/Glob/Grep/Agent session; no Bash or network
     SDK->>Skill: repo, report, finding IDs, output, comments, additional repos
-    Skill->>FS: verify_disposition.json
+    Skill->>FS: Phase 0 validates paths/report and evaluates R0-R7 claims
+    Skill->>FS: phase0_state.json
+    alt at least one requested ID exists in report
+        Skill->>FS: Phase 1 writes extracted_findings.md
+        loop each report-backed finding, optionally parallel
+            Skill->>Skill: inspect sink, reachability, class elimination, sweep
+            Skill->>FS: disposition_VULN-NNN.json
+        end
+    else every requested ID is missing
+        Skill->>Skill: skip phases 1 and 2
+    end
+    Skill->>FS: Phase 4 adds INVALID_INPUT stubs and writes verify_disposition.json
     CLI->>Schema: parse and validate disposition v1
     CLI->>CLI: enforce exactly one entry per requested finding
     loop each disposition
@@ -176,12 +187,50 @@ The verify path treats issue bodies and comments as attacker-influenceable:
    operator-configured alias; it never guesses a repository.
 6. It scopes target-token attachment for additional repositories to authorized path
    prefixes.
-7. It schema-validates model output and checks the finding ID set before any GitHub
+7. Inside the skill, R7 rejects directive-like prose first; R6 handles agent-annotated
+   unresolved hints; R1–R5 then require locally verifiable citations and treat accepted
+   claims only as navigation hints.
+8. It schema-validates model output and checks the finding ID set before any GitHub
    mutation.
 
-The cross-repository preflight is best-effort. An extraction failure yields no extra
+The configured-model cross-repository preflight is best-effort. An extraction failure yields no extra
 checkouts; the verification methodology is expected to classify unsupported claims as
 unverifiable.
+
+### Verification-skill state flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> Preflight
+    Preflight --> Rejected: malformed arguments, missing paths, or invalid report shape
+    Preflight --> Emit: all requested IDs missing
+    Preflight --> Extract: one or more IDs present
+    Extract --> Verify
+    Verify --> Verify: next finding
+    Verify --> Emit: every report-backed finding has a disposition
+    Emit --> Complete: final document assembled
+    Complete --> AgentValidation: Python agent parses and validates schema
+    AgentValidation --> GitHubUpdate: schema and finding set valid
+    AgentValidation --> InfrastructureFailure: missing, malformed, or mismatched output
+    Rejected --> [*]
+    GitHubUpdate --> [*]
+    InfrastructureFailure --> [*]
+```
+
+The skill's intermediate artifacts are:
+
+| Artifact | Purpose |
+|---|---|
+| `phase0_state.json` | Trusted-root identity, report/target metadata, comment-claim outcomes, missing/present IDs, and run-level limitation flags |
+| `verify_run.log.md` | Append-only human summary across phases |
+| `extracted_findings.md` | Focused report fields, sweep pattern, PoC/test references, and accepted claim hints per finding |
+| `disposition_VULN-NNN.json` | One static four-gate verdict for a report-backed finding |
+| `verify_disposition.json` | Ordered v1 aggregate, including phase-4 `INVALID_INPUT` stubs |
+
+Phase 2 may read a PoC for original-attack context but deliberately does not read or run
+the exploit test. Phase 3 is reserved for future replay. If a delegated finding fails to
+produce an artifact, the orchestrator retries it once, then emits an `INCONCLUSIVE` stub
+instead of abandoning the whole run.
 
 ## Remediation runtime
 
@@ -280,4 +329,3 @@ process context rather than infer a complete state machine from the integer alon
 | 2 | Bad programmatic argument shape; `argparse` also uses 2 for CLI parse errors |
 | 3 | Required GitHub scan identity missing |
 | 130 | Operator interruption handled by the outer CLI |
-

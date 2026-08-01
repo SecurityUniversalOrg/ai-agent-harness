@@ -1,2 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+DIR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$DIR_ROOT/scripts/_sandbox_env.sh"
+
+BIN=vuln-scan-harness
+case "${1:-}" in
+    vuln-scan-harness) BIN=$1; shift ;;
+    */vuln-scan-harness)
+        echo "error: please pass the bare name '${1##*/}' instead of the path '${1}'" >&2
+        exit 2 ;;
+
+esac
+[ -x "$REPO_ROOT/.venv/bin/$BIN" ] \
+    || {  echo "error: '$BIN' not found in $REPO_ROOT/bin; please run 'scripts/setup_sandbox.sh'" >&2; exit 1; }
+exec "$REPO_ROOT/.venv/bin/$BIN" "$@"

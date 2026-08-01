@@ -10,4 +10,5 @@ Subsystem documentation:
 
 - [VulnHunter audit skill](vulnhunt/README.md)
 - [VulnHunter headless agent](vulnhunter-agent/README.md)
+- [VulnHunter fix-verification skill](vulnhunt-fix-verify/README.md)
 - [VulnHunter remediation skill](vulnhunter-fix/README.md)
