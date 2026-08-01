@@ -27,7 +27,7 @@ sequenceDiagram
     CLI->>Git: shallow clone (or reuse)
     Git-->>CLI: target checkout
     CLI->>Runner: run_vulnhunt(checkout, policy)
-    Runner->>Results: reject prior results; create timestamped directory
+    Runner->>Results: reject prior results and create timestamped directory
     Runner->>Config: refresh inference credential and build sandbox settings
     Runner->>SDK: start strict-tool session
     SDK->>Skill: /vulnhunt + pre-resolved metadata
@@ -46,7 +46,7 @@ sequenceDiagram
     Runner-->>CLI: newest results directory
 
     opt publish enabled
-        CLI->>Reports: ensure private destination; copy, commit, push report tree
+        CLI->>Reports: ensure private destination, then copy, commit, and push report tree
         Reports-->>CLI: publication commit SHA
     end
 
@@ -129,7 +129,7 @@ sequenceDiagram
     participant Schema as disposition schema
 
     Caller->>CLI: --mode=verify issue URLs [--commit SHA]
-    CLI->>CLI: parse URLs; enforce one host
+    CLI->>CLI: parse URLs and enforce one host
     par for each issue
         CLI->>GH: fetch current issue, comments, timeline events
         CLI->>GH: fetch userContentEdits via GraphQL
@@ -146,7 +146,7 @@ sequenceDiagram
         Git-->>FS: read-only additional checkout
     end
     CLI->>FS: write comments.md with untrusted boundaries and unresolved-hint annotations
-    CLI->>SDK: locked Read/Write/Edit/Glob/Grep/Agent session; no Bash or network
+    CLI->>SDK: locked Read/Write/Edit/Glob/Grep/Agent session with no Bash or network
     SDK->>Skill: repo, report, finding IDs, output, comments, additional repos
     Skill->>FS: Phase 0 validates paths/report and evaluates R0-R7 claims
     Skill->>FS: phase0_state.json
