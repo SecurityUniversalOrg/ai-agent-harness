@@ -3,8 +3,9 @@
 Three token providers share a ``get_valid_token()`` interface so call sites
 don't care which auth mode is active:
 
-- ``ApiKeyTokenManager`` — direct Anthropic API. ``get_valid_token()``
-  returns the configured API key verbatim (no network, no expiry).
+- ``AnthropicAwsApiKeyTokenManager`` — Claude Platform on AWS.
+  ``get_valid_token()`` returns the configured workspace API key verbatim
+  (no network, no expiry).
 - ``OAuthTokenManager`` — OAuth2 client-credentials flow: redeem
   client_id + client_secret against the token endpoint, cache the access
   token, and refresh after a fraction of its declared lifetime. The bearer
@@ -58,12 +59,12 @@ def resolve_verify(tls: TLSConfig) -> str | bool:
     return True
 
 
-class ApiKeyTokenManager:
-    """Token provider for direct Anthropic API auth.
+class AnthropicAwsApiKeyTokenManager:
+    """Token provider for Claude Platform on AWS API-key auth.
 
     Mirrors :class:`OAuthTokenManager`'s ``get_valid_token()`` interface so
-    the rest of the agent is auth-mode agnostic. Returns the configured API
-    key unchanged; there is nothing to mint or refresh.
+    the rest of the agent is auth-mode agnostic. Returns the configured
+    workspace API key unchanged; there is nothing to mint or refresh.
     """
 
     def __init__(self, api_key: str, name: str = "vulnhunter"):
@@ -150,15 +151,19 @@ class OAuthTokenManager:
 
 def make_token_manager(
     config: AgentConfig, name: str = "vulnhunter"
-) -> ApiKeyTokenManager | OAuthTokenManager | SigV4TokenManager:
+) -> AnthropicAwsApiKeyTokenManager | OAuthTokenManager | SigV4TokenManager:
     """Return the Anthropic token provider for the configured auth mode.
 
     All providers expose ``get_valid_token()``, so callers can use the
-    result without caring whether auth is API-key, Bedrock/OAuth, or
-    Bedrock/SigV4.
+    result without caring whether auth is Claude Platform on AWS API-key,
+    Bedrock/OAuth, or Bedrock/SigV4.
     """
     if config.anthropic.auth_mode == "bedrock_oauth":
         return OAuthTokenManager(config.oauth, config.tls, name=name)
     if config.anthropic.auth_mode == "bedrock_sigv4":
         return SigV4TokenManager(name=name)
-    return ApiKeyTokenManager(config.anthropic.api_key, name=name)
+    if config.anthropic.auth_mode == "anthropic_aws":
+        return AnthropicAwsApiKeyTokenManager(
+            config.anthropic.aws_api_key, name=name
+        )
+    raise ValueError(f"Unsupported Anthropic auth mode: {config.anthropic.auth_mode}")

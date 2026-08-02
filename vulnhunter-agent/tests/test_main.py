@@ -550,6 +550,7 @@ def _stub_main_environment_for_args(
     def fake_load_config(*_a: object, **_k: object) -> AgentConfig:
         return AgentConfig(
             anthropic=AnthropicConfig(
+                auth_mode="bedrock_oauth",
                 bedrock_base_url="https://bedrock.example.com",
                 aws_region="us-east-1",
                 model="claude-opus-4-8",
@@ -1262,6 +1263,7 @@ class TestModeDispatchAndFlagRejection:
 
         fake_cfg = AgentConfig(
             anthropic=AnthropicConfig(
+                auth_mode="bedrock_oauth",
                 bedrock_base_url="https://b.example",
                 aws_region="us-east-1",
                 model="claude-opus-4-8",
@@ -1701,5 +1703,4 @@ class TestPreflightStandaloneTokens:
             issues=True,
         )
         assert route.call_count == 1
-
 

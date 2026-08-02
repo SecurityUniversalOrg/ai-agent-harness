@@ -1,11 +1,10 @@
 """LLM calls routed through the Claude Agent SDK.
 
-The scan stage already runs the SDK with bearer auth via env vars
-(``ANTHROPIC_AUTH_TOKEN`` + ``CLAUDE_CODE_USE_BEDROCK=1``). Rather
-than duplicate that machinery for the issues stage, we spin up a
-short-lived ``ClaudeSDKClient`` per call: same auth, same transport,
-same FM-Gateway / Bedrock path, just with no skill loaded and no
-tools available so the model just answers our prompt.
+The scan stage already routes SDK authentication through the shared Claude
+Code settings builder. Rather than duplicate that machinery for the issues
+stage, we spin up a short-lived ``ClaudeSDKClient`` per call: same auth and
+transport, just with no skill loaded and no tools available so the model
+only answers our prompt.
 
 Two entry points (both async):
 - ``call_json``: one model call with same-model retry on transient

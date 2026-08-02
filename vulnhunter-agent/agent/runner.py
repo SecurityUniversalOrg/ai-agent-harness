@@ -467,7 +467,7 @@ _CONTINUATION_PROMPT = (
 
 
 class AuthRejectedError(RuntimeError):
-    """The Bedrock proxy rejected the bearer token; retrying won't help."""
+    """The inference provider rejected the credential; retrying won't help."""
 
 
 class RateLimitError(RuntimeError):
@@ -520,9 +520,9 @@ async def run_vulnhunt(
 
     ``backoffs`` defaults to ``_SCAN_RETRY_BACKOFFS``; tests inject
     ``()`` (no retry) or ``(0.0, 0.0, 0.0)`` (zero-delay) to keep runs
-    fast. The token is refreshed inside the retry block, so a backoff
-    long enough to rotate the bearer doesn't carry a stale credential
-    into the retry attempt.
+    fast. The credential is resolved inside the retry block, so a backoff
+    long enough to rotate an OAuth bearer doesn't carry a stale credential
+    into the retry attempt; static workspace keys are returned unchanged.
 
     ``enable_bash=True`` adds ``"Bash"`` to the SDK tool allow-list for
     this run. The default is False; the skill prompts assume Bash is
@@ -539,14 +539,10 @@ async def run_vulnhunt(
     token_manager = make_token_manager(config)
     auth_token = token_manager.get_valid_token()
     if auth_token:
-        # Token prefix/suffix are useful for confirming propagation but reveal
-        # JWT header bytes, so keep them out of INFO output. Set --log-level
-        # DEBUG when you actually need to verify what the SDK received.
-        prefix = auth_token[:8]
-        suffix = auth_token[-4:] if len(auth_token) > 12 else ""
-        logger.debug(
-            "Token forwarded to SDK: %s...%s (len=%d)", prefix, suffix, len(auth_token)
-        )
+        # Confirm propagation without logging any credential bytes. Workspace
+        # API keys are long-lived secrets, and even prefixes/suffixes should
+        # not enter debug logs.
+        logger.debug("Credential forwarded to SDK (len=%d)", len(auth_token))
 
     model = model_override or config.anthropic.model
 
@@ -670,9 +666,9 @@ async def run_vulnhunt(
     try:
         async for attempt in retrying:
             with attempt:
-                # Per-attempt: refresh token and rebuild settings/options so
-                # the next retry doesn't carry a stale bearer (the JWT may
-                # have rotated during the backoff sleep).
+                # Per-attempt: resolve the credential and rebuild settings/options
+                # so the next retry doesn't carry a stale OAuth bearer. Static
+                # workspace API keys are returned unchanged.
                 auth_token = token_manager.get_valid_token()
                 settings_json = build_claude_settings(
                     config, auth_token, model=model, scan_id=scan_id
@@ -1095,11 +1091,11 @@ async def _run_scan_session(
                         consecutive_auth_failures += 1
                         if consecutive_auth_failures >= _MAX_CONSECUTIVE_AUTH_FAILURES:
                             raise AuthRejectedError(
-                                f"Bedrock proxy rejected the bearer token "
+                                f"Inference provider rejected the credential "
                                 f"{consecutive_auth_failures} consecutive times "
-                                "(error_status=401 authentication_failed). The OAuth "
-                                "client likely lacks Bedrock access — check the "
-                                "JWT's aud/scope claims against a known-working client."
+                                "(error_status=401 authentication_failed). Check the "
+                                f"credentials and provider access configured for "
+                                f"auth_mode={config.anthropic.auth_mode!r}."
                             )
                     else:
                         consecutive_auth_failures = 0

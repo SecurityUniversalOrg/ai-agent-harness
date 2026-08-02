@@ -154,6 +154,7 @@ class TestResolve:
 
 class TestLoadConfig:
     def _set_required_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VULNHUNT_ANTHROPIC_AUTH_MODE", "bedrock_oauth")
         monkeypatch.setenv("VULNHUNT_ANTHROPIC_BEDROCK_BASE_URL", "https://b.example.com")
         monkeypatch.setenv("VULNHUNT_ANTHROPIC_MODEL", "claude-opus-4-8")
         monkeypatch.setenv("VULNHUNT_OAUTH_TOKEN_ENDPOINT", "https://oauth.example.com/token")
@@ -180,6 +181,7 @@ class TestLoadConfig:
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://b.example.com"
 model = "claude-opus-4-8"
 
@@ -193,6 +195,70 @@ client_secret = "tomlcsec"
         assert cfg.oauth.client_id == "tomlcid"
         assert cfg.source_path == path.resolve()
 
+    def test_anthropic_aws_defaults_and_credentials_from_toml(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "cfg.toml"
+        path.write_text(
+            """
+[anthropic]
+model = "claude-opus-4-8"
+aws_workspace_id = "workspace-toml"
+aws_region = "us-west-2"
+aws_api_key = "aws-key-toml"
+"""
+        )
+        cfg = load_config(path)
+        assert cfg.anthropic.auth_mode == "anthropic_aws"
+        assert cfg.anthropic.aws_workspace_id == "workspace-toml"
+        assert cfg.anthropic.aws_region == "us-west-2"
+        assert cfg.anthropic.aws_api_key == "aws-key-toml"
+
+    def test_anthropic_aws_credentials_from_agent_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VULNHUNT_ANTHROPIC_MODEL", "claude-opus-4-8")
+        monkeypatch.setenv(
+            "VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID", "workspace-env"
+        )
+        monkeypatch.setenv("VULNHUNT_ANTHROPIC_AWS_REGION", "us-east-2")
+        monkeypatch.setenv("VULNHUNT_ANTHROPIC_AWS_API_KEY", "aws-key-env")
+        from agent import config as cfg_mod
+
+        monkeypatch.setattr(cfg_mod, "_DEFAULT_CONFIG_FILENAME", "no-such.toml")
+        cfg = load_config()
+        assert cfg.anthropic.auth_mode == "anthropic_aws"
+        assert cfg.anthropic.aws_workspace_id == "workspace-env"
+        assert cfg.anthropic.aws_region == "us-east-2"
+        assert cfg.anthropic.aws_api_key == "aws-key-env"
+
+    @pytest.mark.parametrize(
+        "field",
+        ["aws_workspace_id", "aws_region", "aws_api_key"],
+    )
+    def test_anthropic_aws_rejects_blank_required_field(
+        self, tmp_path: Path, field: str
+    ) -> None:
+        values = {
+            "aws_workspace_id": "workspace-test",
+            "aws_region": "us-east-1",
+            "aws_api_key": "aws-key-test",
+        }
+        values[field] = ""
+        path = tmp_path / "cfg.toml"
+        path.write_text(
+            "\n".join(
+                [
+                    "[anthropic]",
+                    'auth_mode = "anthropic_aws"',
+                    'model = "claude-opus-4-8"',
+                    *(f'{key} = "{value}"' for key, value in values.items()),
+                ]
+            )
+        )
+        with pytest.raises(ValueError, match=field):
+            load_config(path)
+
     def test_env_overrides_specific_toml_field(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -200,6 +266,7 @@ client_secret = "tomlcsec"
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://from-toml.example.com"
 model = "claude-opus-4-8"
 
@@ -221,6 +288,7 @@ client_secret = "tomlcsec"
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://b"
 model = "m"
 [oauth]
@@ -330,6 +398,7 @@ client_secret = "y"
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://b"
 model = "m"
 [oauth]
@@ -349,6 +418,7 @@ destination_repo = "https://github.com/o/r"
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://b"
 model = "m"
 [oauth]
@@ -386,6 +456,7 @@ client_secret = "y"
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://b"
 model = "m"
 [oauth]
@@ -511,6 +582,7 @@ model = "m"
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://b"
 model = "m"
 [oauth]
@@ -550,6 +622,7 @@ class TestLoggingSection:
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://b"
 model = "m"
 [oauth]
@@ -567,6 +640,7 @@ client_secret = "y"
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://b"
 model = "m"
 [oauth]
@@ -589,6 +663,7 @@ retries = true
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://b"
 model = "m"
 [oauth]
@@ -611,6 +686,7 @@ retries = false
         path.write_text(
             """
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://b"
 model = "m"
 [oauth]

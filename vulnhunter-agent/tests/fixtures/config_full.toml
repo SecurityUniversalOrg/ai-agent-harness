@@ -1,5 +1,6 @@
 # Full config exercising every section.
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://bedrock.example.com"
 aws_region = "us-west-2"
 model = "claude-opus-4-8"

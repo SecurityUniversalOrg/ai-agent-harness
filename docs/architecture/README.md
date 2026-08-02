@@ -92,7 +92,7 @@ flowchart LR
     scheduler["CI, scheduler, or fleet wrapper"]
     target["Target source repository"]
     github["GitHub / GitHub Enterprise"]
-    inference["Anthropic API or Amazon Bedrock"]
+    inference["Claude Platform on AWS or Amazon Bedrock"]
     telemetry["OTLP collector"]
 
     system["VulnHunter security lifecycle\nAudit · publish · track · remediate · verify"]
@@ -116,7 +116,7 @@ flowchart LR
 | Scheduler/wrapper | Provides job discovery, isolation, retries, secrets, and status mapping | `python -m agent`, exit code, `scan_manifest.json` |
 | Target repository | Untrusted code to analyze or fix | Git over HTTPS/SSH; local checkout |
 | GitHub/GHE | Source hosting, report hosting, issue state, custom properties, PR delivery | Git and REST/GraphQL APIs |
-| Inference provider | Runs the root agent, subagents, extraction, semantic dedup, and reference extraction | Claude Agent SDK via Anthropic API or Bedrock |
+| Inference provider | Runs the root agent, subagents, extraction, semantic dedup, and reference extraction | Claude Agent SDK via Claude Platform on AWS or Bedrock |
 | OAuth endpoint | Optionally mints a bearer for a Bedrock proxy | OAuth2 client credentials |
 | Token broker | Optionally refreshes GitHub identities into role-specific JSON files | Local `scan.json` and `reports.json` files |
 | OTLP collector | Optionally receives Claude Code telemetry | OTLP/gRPC |
@@ -420,14 +420,14 @@ flowchart TB
     end
 
     github["GitHub / GHE"]
-    anthropic["Anthropic API"]
+    anthropicAws["Claude Platform on AWS"]
     bedrock["Bedrock runtime + STS"]
     oauth["Optional OAuth endpoint"]
     otlp["Optional OTLP collector"]
 
     py <-->|REST, GraphQL, git| github
     py --> oauth
-    sdk --> anthropic
+    sdk --> anthropicAws
     sdk --> bedrock
     sdk --> otlp
 ```

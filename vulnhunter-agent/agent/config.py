@@ -9,6 +9,9 @@ Env-var convention: ``VULNHUNT_<SECTION>_<KEY>`` (uppercase). Examples:
     VULNHUNT_OAUTH_CLIENT_ID
     VULNHUNT_OAUTH_CLIENT_SECRET
     VULNHUNT_ANTHROPIC_MODEL
+    VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID
+    VULNHUNT_ANTHROPIC_AWS_REGION
+    VULNHUNT_ANTHROPIC_AWS_API_KEY
     VULNHUNT_GITHUB_SCAN_TOKEN
     VULNHUNT_GITHUB_REPORTS_TOKEN
     VULNHUNT_GITHUB_BROKER_TOKEN_DIR
@@ -31,9 +34,11 @@ from typing import Any
 @dataclass(frozen=True)
 class AnthropicConfig:
     # auth_mode selects how the agent authenticates to Claude:
-    #   "api_key"       — direct Anthropic API using an API key (the default;
-    #                     read from [anthropic].api_key or the ANTHROPIC_API_KEY
-    #                     env var). bedrock_base_url / [oauth] are unused.
+    #   "anthropic_aws" — Claude Platform on AWS using a workspace-scoped API
+    #                     key (the default). Requires aws_workspace_id,
+    #                     aws_region, and aws_api_key. The settings builder
+    #                     passes the corresponding Claude Code environment
+    #                     variables; bedrock_base_url / [oauth] are unused.
     #   "bedrock_oauth" — route through an AWS Bedrock proxy fronted by an
     #                     OAuth2 client-credentials token endpoint. Requires
     #                     bedrock_base_url and the [oauth] block.
@@ -54,8 +59,9 @@ class AnthropicConfig:
     #                     credentials require widening the sandbox network
     #                     allow-list or disabling the sandbox.
     model: str
-    auth_mode: str = "api_key"
-    api_key: str = ""
+    auth_mode: str = "anthropic_aws"
+    aws_workspace_id: str = ""
+    aws_api_key: str = ""
     bedrock_base_url: str = ""
     aws_region: str = "us-east-1"
     # bedrock_sigv4 mode only: optional named AWS profile from the shared
@@ -430,24 +436,36 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AgentConfig:
     github_raw = raw.get("github", {})
 
     auth_mode = (
-        str(_resolve(anthropic_raw, "anthropic", "auth_mode", default="api_key"))
+        str(
+            _resolve(
+                anthropic_raw,
+                "anthropic",
+                "auth_mode",
+                default="anthropic_aws",
+            )
+        )
         .strip()
         .lower()
     )
-    if auth_mode not in ("api_key", "bedrock_oauth", "bedrock_sigv4"):
+    if auth_mode not in ("anthropic_aws", "bedrock_oauth", "bedrock_sigv4"):
         raise ValueError(
-            "anthropic.auth_mode must be 'api_key', 'bedrock_oauth', or "
+            "anthropic.auth_mode must be 'anthropic_aws', 'bedrock_oauth', or "
             f"'bedrock_sigv4', got '{auth_mode}'"
         )
-    # api_key resolves from [anthropic].api_key / VULNHUNT_ANTHROPIC_API_KEY,
-    # falling back to the standard ANTHROPIC_API_KEY env var.
-    api_key = str(
-        _resolve(anthropic_raw, "anthropic", "api_key", default="")
-    ) or os.environ.get("ANTHROPIC_API_KEY", "")
     anthropic = AnthropicConfig(
         model=str(_resolve(anthropic_raw, "anthropic", "model", required=True)),
         auth_mode=auth_mode,
-        api_key=api_key,
+        aws_workspace_id=str(
+            _resolve(
+                anthropic_raw,
+                "anthropic",
+                "aws_workspace_id",
+                default="",
+            )
+        ).strip(),
+        aws_api_key=str(
+            _resolve(anthropic_raw, "anthropic", "aws_api_key", default="")
+        ).strip(),
         bedrock_base_url=str(
             _resolve(anthropic_raw, "anthropic", "bedrock_base_url", default="")
         ).strip(),
@@ -458,6 +476,16 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AgentConfig:
             _resolve(anthropic_raw, "anthropic", "aws_profile", default="")
         ).strip(),
     )
+    if auth_mode == "anthropic_aws" and (
+        not anthropic.aws_workspace_id
+        or not anthropic.aws_region
+        or not anthropic.aws_api_key
+    ):
+        raise ValueError(
+            "anthropic.auth_mode='anthropic_aws' requires "
+            "anthropic.aws_workspace_id, anthropic.aws_region, and "
+            "anthropic.aws_api_key"
+        )
     if auth_mode == "bedrock_oauth" and not anthropic.bedrock_base_url:
         raise ValueError(
             "anthropic.auth_mode='bedrock_oauth' requires anthropic.bedrock_base_url"

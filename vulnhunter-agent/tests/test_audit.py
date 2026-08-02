@@ -488,6 +488,7 @@ class TestWriterFromConfig:
         toml = tmp_path / "cfg.toml"
         toml.write_text(
             '[anthropic]\n'
+            'auth_mode = "bedrock_oauth"\n'
             'bedrock_base_url = "https://bedrock.example.com"\n'
             'model = "claude-opus-4-8"\n'
             '[oauth]\n'

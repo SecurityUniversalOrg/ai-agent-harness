@@ -7,7 +7,9 @@
 # Every value below can also be supplied via environment variables, which
 # take precedence. The naming pattern is VULNHUNT_<SECTION>_<KEY> in upper
 # case. Examples:
-#     VULNHUNT_ANTHROPIC_API_KEY   (or the standard ANTHROPIC_API_KEY)
+#     VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID
+#     VULNHUNT_ANTHROPIC_AWS_REGION
+#     VULNHUNT_ANTHROPIC_AWS_API_KEY
 #     VULNHUNT_ANTHROPIC_MODEL
 #     VULNHUNT_GITHUB_SCAN_TOKEN
 #     VULNHUNT_GITHUB_REPORTS_TOKEN
@@ -16,9 +18,10 @@
 
 [anthropic]
 # How the agent authenticates to Claude:
-#   "api_key"       — direct Anthropic API (default). Set api_key below or
-#                     export ANTHROPIC_API_KEY. bedrock_base_url / [oauth]
-#                     are ignored.
+#   "anthropic_aws" — Claude Platform on AWS (default). Claude Code receives
+#                     CLAUDE_CODE_USE_ANTHROPIC_AWS=1 plus the configured
+#                     workspace ID, region, and workspace API key.
+#                     bedrock_base_url / [oauth] are ignored.
 #   "bedrock_oauth" — route through an AWS Bedrock proxy fronted by an OAuth2
 #                     client-credentials endpoint. Requires bedrock_base_url
 #                     and the [oauth] block.
@@ -36,17 +39,23 @@
 #                     credentials (instance/task roles) are NOT reachable —
 #                     widen the sandbox network allow-list or disable the
 #                     sandbox for those.
-auth_mode = "api_key"
-api_key = ""
+auth_mode = "anthropic_aws"
 # Default model. Override per-invocation with --model.
 model = "claude-opus-4-8"
 
-# --- bedrock_oauth mode only (leave blank for api_key mode) ---
+# --- anthropic_aws mode ---
+# Workspace and API key issued for Claude Platform on AWS. Claude Code receives
+# these as ANTHROPIC_AWS_WORKSPACE_ID and ANTHROPIC_AWS_API_KEY.
+aws_workspace_id = ""
+aws_api_key = ""
+# Passed to Claude Code as AWS_REGION for every AWS-backed mode.
+aws_region = "us-east-1"
+
+# --- bedrock_oauth mode only (leave blank for anthropic_aws mode) ---
 # Base URL of the proxy that fronts Bedrock-hosted Claude.
 # --- bedrock_sigv4 mode: leave bedrock_base_url blank for the regional
 #     endpoint, or set it for a VPC/custom Bedrock endpoint. ---
 bedrock_base_url = ""
-aws_region = "us-east-1"
 # bedrock_sigv4 mode only: optional named AWS profile. Blank → default chain.
 aws_profile = ""
 
@@ -210,4 +219,3 @@ clone_timeout_seconds = 300
 [repo_properties.github_property_map]
 # "appId" = "app_id_tag"
 # "ownerTeam" = "owner_team"
-

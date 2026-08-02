@@ -37,18 +37,22 @@ class TestBuildSandbox:
         sandbox = _build_sandbox(cfg)
         assert sandbox["network"]["allowedDomains"] == ["bedrock.example.com"]
 
-    def test_api_key_mode_allows_anthropic_api_host(
+    def test_anthropic_aws_mode_allows_regional_platform_host(
         self, agent_config: Callable[..., AgentConfig]
     ) -> None:
         cfg = agent_config(
             anthropic=AnthropicConfig(
                 model="claude-opus-4-8",
-                auth_mode="api_key",
-                api_key="sk-test",
+                auth_mode="anthropic_aws",
+                aws_workspace_id="workspace-test",
+                aws_region="us-west-2",
+                aws_api_key="aws-key-test",
             )
         )
         sandbox = _build_sandbox(cfg)
-        assert sandbox["network"]["allowedDomains"] == ["api.anthropic.com"]
+        assert sandbox["network"]["allowedDomains"] == [
+            "aws-external-anthropic.us-west-2.api.aws"
+        ]
 
     def test_sandbox_flags_propagate(
         self, agent_config: Callable[..., AgentConfig]
@@ -132,7 +136,12 @@ class TestBuildSandbox:
         self, agent_config: Callable[..., AgentConfig]
     ) -> None:
         for anthropic in (
-            AnthropicConfig(model="m", auth_mode="api_key", api_key="sk-test"),
+            AnthropicConfig(
+                model="m",
+                auth_mode="anthropic_aws",
+                aws_workspace_id="workspace-test",
+                aws_api_key="aws-key-test",
+            ),
             AnthropicConfig(
                 model="m",
                 auth_mode="bedrock_oauth",
@@ -278,34 +287,41 @@ class TestBuildClaudeSettings:
         assert env["NO_PROXY"] == "localhost,10.0.0.0/8,.internal.example"
         assert env["no_proxy"] == "localhost,10.0.0.0/8,.internal.example"
 
-    def test_api_key_mode_sets_api_key_and_omits_bedrock(
+    def test_anthropic_aws_mode_sets_platform_environment(
         self, agent_config: Callable[..., AgentConfig]
     ) -> None:
         cfg = agent_config(
             anthropic=AnthropicConfig(
                 model="claude-opus-4-8",
-                auth_mode="api_key",
-                api_key="sk-fromconfig",
+                auth_mode="anthropic_aws",
+                aws_workspace_id="workspace-test",
+                aws_region="us-east-2",
+                aws_api_key="aws-key-fromconfig",
             )
         )
-        # auth_token empty → falls back to configured api_key.
+        # auth_token empty → falls back to the configured workspace API key.
         env = json.loads(build_claude_settings(cfg, "", model="claude-opus-4-8"))["env"]
-        assert env["ANTHROPIC_API_KEY"] == "sk-fromconfig"
+        assert env["CLAUDE_CODE_USE_ANTHROPIC_AWS"] == "1"
+        assert env["ANTHROPIC_AWS_WORKSPACE_ID"] == "workspace-test"
+        assert env["AWS_REGION"] == "us-east-2"
+        assert env["ANTHROPIC_AWS_API_KEY"] == "aws-key-fromconfig"
+        assert "ANTHROPIC_API_KEY" not in env
         assert "CLAUDE_CODE_USE_BEDROCK" not in env
         assert "ANTHROPIC_AUTH_TOKEN" not in env
 
-    def test_api_key_mode_prefers_passed_token(
+    def test_anthropic_aws_mode_prefers_passed_token(
         self, agent_config: Callable[..., AgentConfig]
     ) -> None:
         cfg = agent_config(
             anthropic=AnthropicConfig(
                 model="claude-opus-4-8",
-                auth_mode="api_key",
-                api_key="sk-fromconfig",
+                auth_mode="anthropic_aws",
+                aws_workspace_id="workspace-test",
+                aws_api_key="aws-key-fromconfig",
             )
         )
-        env = json.loads(build_claude_settings(cfg, "sk-passed", model="claude-opus-4-8"))["env"]
-        assert env["ANTHROPIC_API_KEY"] == "sk-passed"
+        env = json.loads(build_claude_settings(cfg, "aws-key-passed", model="claude-opus-4-8"))["env"]
+        assert env["ANTHROPIC_AWS_API_KEY"] == "aws-key-passed"
 
     def test_sigv4_sets_bedrock_but_omits_bearer_and_skip_auth(
         self, agent_config: Callable[..., AgentConfig]
@@ -328,7 +344,7 @@ class TestBuildClaudeSettings:
         assert env["ENABLE_PROMPT_CACHING_1H_BEDROCK"] == "1"
         assert "ANTHROPIC_AUTH_TOKEN" not in env
         assert "CLAUDE_CODE_SKIP_BEDROCK_AUTH" not in env
-        assert "ANTHROPIC_API_KEY" not in env
+        assert "ANTHROPIC_AWS_API_KEY" not in env
         # No explicit endpoint / profile → those keys are omitted.
         assert "ANTHROPIC_BEDROCK_BASE_URL" not in env
         assert "AWS_PROFILE" not in env

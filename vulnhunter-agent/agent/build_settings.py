@@ -1,11 +1,11 @@
 """Build the Claude Code settings JSON the SDK passes through to the CLI.
 
-Routes Anthropic calls one of three ways: directly to the Anthropic API
-(``api_key`` mode), through an AWS Bedrock proxy fronted by an OAuth bearer
-token (``bedrock_oauth`` mode), or directly to Amazon Bedrock with SigV4
-request signing via the standard AWS credential chain (``bedrock_sigv4``
-mode). It also blanks out inherited HTTP proxies, applies an OS-level
-sandbox, and (optionally) enables OTLP telemetry.
+Routes Anthropic calls one of three ways: through Claude Platform on AWS with
+a workspace API key (``anthropic_aws`` mode), through an AWS Bedrock proxy
+fronted by an OAuth bearer token (``bedrock_oauth`` mode), or directly to
+Amazon Bedrock with SigV4 request signing via the standard AWS credential
+chain (``bedrock_sigv4`` mode). It also blanks out inherited HTTP proxies,
+applies an OS-level sandbox, and (optionally) enables OTLP telemetry.
 """
 
 from __future__ import annotations
@@ -46,6 +46,9 @@ def resolve_autocompact_pct(model: str, override: int | None) -> int:
 
 def _anthropic_host(cfg: AgentConfig) -> str:
     """The network host the SDK talks to, for the sandbox allow-list."""
+    if cfg.anthropic.auth_mode == "anthropic_aws":
+        region = cfg.anthropic.aws_region
+        return f"aws-external-anthropic.{region}.api.aws" if region else ""
     if cfg.anthropic.auth_mode == "bedrock_oauth":
         return urlparse(cfg.anthropic.bedrock_base_url).hostname or ""
     if cfg.anthropic.auth_mode == "bedrock_sigv4":
@@ -55,7 +58,7 @@ def _anthropic_host(cfg: AgentConfig) -> str:
             return urlparse(cfg.anthropic.bedrock_base_url).hostname or ""
         region = cfg.anthropic.aws_region
         return f"bedrock-runtime.{region}.amazonaws.com" if region else ""
-    return "api.anthropic.com"
+    return ""
 
 
 def _sandbox_allow_read_paths(cfg: AgentConfig) -> list[str]:
@@ -135,7 +138,16 @@ def build_claude_settings(
         "NODE_TLS_REJECT_UNAUTHORIZED": "",
     }
 
-    if cfg.anthropic.auth_mode == "bedrock_oauth":
+    if cfg.anthropic.auth_mode == "anthropic_aws":
+        env.update(
+            {
+                "CLAUDE_CODE_USE_ANTHROPIC_AWS": "1",
+                "ANTHROPIC_AWS_WORKSPACE_ID": cfg.anthropic.aws_workspace_id,
+                "AWS_REGION": cfg.anthropic.aws_region,
+                "ANTHROPIC_AWS_API_KEY": auth_token or cfg.anthropic.aws_api_key,
+            }
+        )
+    elif cfg.anthropic.auth_mode == "bedrock_oauth":
         env.update(
             {
                 "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1",
@@ -176,9 +188,9 @@ def build_claude_settings(
         if cfg.anthropic.aws_profile:
             env["AWS_PROFILE"] = cfg.anthropic.aws_profile
     else:
-        # Direct Anthropic API. The API key rides in as auth_token (from the
-        # token provider) or falls back to the configured value.
-        env["ANTHROPIC_API_KEY"] = auth_token or cfg.anthropic.api_key
+        raise ValueError(
+            f"Unsupported Anthropic auth mode: {cfg.anthropic.auth_mode}"
+        )
 
     # Cap how long an async subagent (Task tool) can go without forward
     # progress before the CLI returns a "Request timed out" tool result

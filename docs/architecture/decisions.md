@@ -82,11 +82,13 @@ itself, so deployment isolation is still required.
 
 ## IADR-004: Unify three inference-authentication modes
 
-**Context.** Deployments may call Anthropic directly, use an OAuth-fronted Bedrock
-proxy, or call Bedrock with the AWS credential chain and SigV4.
+**Context.** Deployments may use Claude Platform on AWS with a workspace API key, use
+an OAuth-fronted Bedrock proxy, or call Bedrock with the AWS credential chain and SigV4.
 
-**Decision.** Expose `get_valid_token()` through API-key, OAuth, and SigV4 providers.
-Centralize provider-specific environment construction in `build_claude_settings`.
+**Decision.** Expose `get_valid_token()` through Claude Platform on AWS API-key, OAuth,
+and SigV4 providers. Centralize provider-specific environment construction in
+`build_claude_settings`; make `anthropic_aws` the default and translate its TOML fields
+to the four Claude Code provider variables.
 
 **Consequences.** Scan, verify, extraction, and dedup code stay authentication-agnostic.
 The shared interface returns an empty string for SigV4, so correct omission of bearer

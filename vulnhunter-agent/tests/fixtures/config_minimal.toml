@@ -1,5 +1,6 @@
 # Minimal config: only required fields. Defaults supply the rest.
 [anthropic]
+auth_mode = "bedrock_oauth"
 bedrock_base_url = "https://bedrock.example.com"
 model = "claude-opus-4-8"
 

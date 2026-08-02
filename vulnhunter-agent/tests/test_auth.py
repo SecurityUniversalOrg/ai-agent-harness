@@ -12,7 +12,7 @@ import respx
 
 from agent import auth as auth_mod
 from agent.auth import (
-    ApiKeyTokenManager,
+    AnthropicAwsApiKeyTokenManager,
     AuthTokenError,
     OAuthTokenManager,
     SigV4TokenManager,
@@ -246,7 +246,12 @@ class TestSigV4TokenManager:
 
 class TestMakeTokenManager:
     def _anthropic(self, **overrides: object) -> AnthropicConfig:
-        base = dict(model="m", auth_mode="api_key")
+        base = dict(
+            model="m",
+            auth_mode="anthropic_aws",
+            aws_workspace_id="workspace-x",
+            aws_api_key="aws-key-x",
+        )
         base.update(overrides)
         return AnthropicConfig(**base)  # type: ignore[arg-type]
 
@@ -269,8 +274,14 @@ class TestMakeTokenManager:
         )
         assert isinstance(make_token_manager(cfg), OAuthTokenManager)
 
-    def test_api_key_mode_returns_api_key_manager(self, agent_config) -> None:
+    def test_anthropic_aws_mode_returns_workspace_api_key_manager(
+        self, agent_config
+    ) -> None:
         cfg = agent_config(
-            anthropic=self._anthropic(auth_mode="api_key", api_key="sk-x")
+            anthropic=self._anthropic(
+                auth_mode="anthropic_aws", aws_api_key="aws-key-x"
+            )
         )
-        assert isinstance(make_token_manager(cfg), ApiKeyTokenManager)
+        manager = make_token_manager(cfg)
+        assert isinstance(manager, AnthropicAwsApiKeyTokenManager)
+        assert manager.get_valid_token() == "aws-key-x"

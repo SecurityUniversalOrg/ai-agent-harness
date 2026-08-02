@@ -38,12 +38,19 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Strip env vars that would otherwise leak into the test process.
 
     - VULNHUNT_*: agent config, must start from a known state.
+    - Claude Platform on AWS vars: provider credentials must not leak from the
+      developer shell into configuration or settings tests.
     - *_PROXY / NO_PROXY: httpx auto-picks these up; if the dev shell has
       a SOCKS proxy configured, every respx-mocked test would try to
       route through it and fail with "socksio not installed".
     """
     for key in list(os.environ):
         if key.startswith("VULNHUNT_") or key.upper() in (
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AWS_API_KEY",
+            "ANTHROPIC_AWS_WORKSPACE_ID",
+            "AWS_REGION",
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS",
             "HTTP_PROXY",
             "HTTPS_PROXY",
             "ALL_PROXY",
@@ -105,7 +112,6 @@ def _build_agent_config(**overrides: Any) -> AgentConfig:
         "anthropic": AnthropicConfig(
             model="claude-opus-4-8",
             auth_mode="bedrock_oauth",
-            api_key="",
             bedrock_base_url="https://bedrock.example.com",
             aws_region="us-east-1",
         ),
