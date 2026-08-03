@@ -146,6 +146,15 @@ If a finding triggered the **Interactive collaboration loop** (next section) and
 
 ## Pre-Implementation Setup
 
+**Automated local dry-run:** when `VULNFIX_AUTOMATED=1` and the run-scoped
+configuration has `execution.delivery_enabled=false`, skip the access/fork mutation
+below. Use the existing checkout at `behavior.target_checkout`; the Python orchestrator
+created it before removing GitHub credentials and default GitHub egress from the model
+session. Do not clone/fetch, run `gh`, change remotes, push, or perform any other GitHub
+operation. Create the same masked per-finding local branches and retain them for
+inspection. All TDD, evidence, verify, sweep, body-rendering, and local-gate steps still
+apply.
+
 **Step 1: Check repo access.**
 ```bash
 bash scripts/check_repo_access.sh "$TARGET_REPO"
@@ -592,4 +601,3 @@ Steps E.5 (discrimination evidence) and G.5 (pre-existing test updates) are inli
 **CWE-class routing (REQ-CWE-003).** The plan orchestrator injects the matching worker-class prompt (`worker_agent_authz.md` / `worker_agent_injection.md` / `worker_agent_crypto.md` / `worker_agent_resource.md` / `worker_agent_config.md`); all extend `worker_agent_common.md`.
 
 **Crypto trust-chain gate for FULL (REQ-CWE-007).** Under `worker_agent_crypto.md`, `completeness_tier: FULL` requires all four `plan.crypto_trust_chain` booleans (`algorithm_approved`, `key_source_approved`, `key_rotation_present`, `transport_encrypted`) to be `true`. Any `false` forces `MITIGATION` with a `trust-chain:` residual entry.
-

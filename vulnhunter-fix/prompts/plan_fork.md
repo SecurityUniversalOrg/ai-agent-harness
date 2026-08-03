@@ -72,4 +72,7 @@ Then for each finding, briefly describe:
 - The fix approach (from VulnHunter report).
 - Auto-patchable, or routed to an issue.
 
-Ask user to confirm before proceeding to Phase 3.
+In interactive execution, ask the user to confirm before proceeding to Phase 3. Under
+`VULNFIX_AUTOMATED=1`, validate and record the Plan checkpoint required by `SKILL.md`,
+then proceed without `AskUserQuestion`; any unresolved policy/design choice must be
+routed to a structured human-required outcome rather than guessed.

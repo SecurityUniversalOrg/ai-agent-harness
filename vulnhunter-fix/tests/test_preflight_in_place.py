@@ -175,6 +175,27 @@ class TestProbeSkipping:
         assert called["probe"] is True
         assert "Filesystem:" in out
 
+    def test_automated_profile_accepts_existing_sdk_session(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("VULNFIX_AUTOMATED", "1")
+        for fn in (
+            "check_python", "check_git", "check_gh_cli", "check_memory",
+            "check_disk_space", "check_git_clone_writable", "check_in_place_mode",
+            "check_graphifyy", "check_backend_isolation", "check_jsonschema",
+        ):
+            monkeypatch.setattr(preflight, fn, lambda *a, **kw: None)
+        monkeypatch.setattr(
+            preflight,
+            "check_claude_cli",
+            lambda: pytest.fail("standalone claude check must not run in agent mode"),
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            preflight.main()
+        assert excinfo.value.code == 0
+        assert "Claude Agent SDK session (automated profile)" in capsys.readouterr().out
+
 
 class TestNoNetworkProbesInMain:
     """Regression guard: main() must not invoke any network probes."""

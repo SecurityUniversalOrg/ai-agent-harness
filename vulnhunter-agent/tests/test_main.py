@@ -1219,7 +1219,48 @@ class TestModeDispatchAndFlagRejection:
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
         assert "--mode is required" in err
-        assert "scan or verify" in err
+        assert "scan, fix, or verify" in err
+
+    def test_fix_mode_dispatches_with_two_positionals(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        captured: dict[str, Any] = {}
+
+        async def fake_amain_fix(args: Any) -> int:
+            captured["targets"] = args.targets
+            captured["no_post"] = args.no_post
+            captured["test_policy"] = args.test_policy
+            return 0
+
+        monkeypatch.setattr(main_mod, "_amain_fix", fake_amain_fix)
+        rc = main(
+            [
+                "--mode=fix",
+                "https://github.com/org/repo",
+                "/reports/run-1",
+                "--no-post",
+                "--test-policy",
+                "must-pass",
+            ]
+        )
+        assert rc == 0
+        assert captured == {
+            "targets": ["https://github.com/org/repo", "/reports/run-1"],
+            "no_post": True,
+            "test_policy": "must-pass",
+        }
+
+    @pytest.mark.parametrize("targets", [["one"], ["one", "two", "three"]])
+    def test_fix_mode_requires_exactly_two_targets(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        targets: list[str],
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(["--mode=fix", *targets])
+        assert excinfo.value.code == 2
+        assert "exactly two positional" in capsys.readouterr().err
 
     def test_verify_mode_dispatches_to_verify_amain(
         self,
@@ -1393,7 +1434,7 @@ class TestModeDispatchAndFlagRejection:
             )
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
-        assert "scan-mode only" in err
+        assert "cannot be used with --mode=verify" in err
 
     @pytest.mark.parametrize(
         "extra",
@@ -1419,7 +1460,22 @@ class TestModeDispatchAndFlagRejection:
             )
         assert excinfo.value.code == 2
         err = capsys.readouterr().err
-        assert "verify-mode only" in err
+        assert "mode only" in err
+
+    def test_scan_mode_rejects_fix_only_test_policy(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "--mode=scan",
+                    "https://github.com/o/r",
+                    "--test-policy",
+                    "must-pass",
+                ]
+            )
+        assert excinfo.value.code == 2
+        assert "fix-mode only" in capsys.readouterr().err
 
     def test_scan_mode_requires_exactly_one_target(
         self, capsys: pytest.CaptureFixture[str]
@@ -1703,4 +1759,3 @@ class TestPreflightStandaloneTokens:
             issues=True,
         )
         assert route.call_count == 1
-

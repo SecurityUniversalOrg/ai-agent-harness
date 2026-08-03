@@ -224,6 +224,25 @@ class TestShallowClone:
         assert "x-access-token" not in injected_url
         assert "ghp_secret" not in injected_url
 
+    def test_environment_token_is_not_placed_in_argv_or_remote(
+        self, tmp_path: Path, captured_runs: list[dict[str, Any]]
+    ) -> None:
+        shallow_clone(
+            "https://github.com/org/myrepo",
+            tmp_path,
+            github_token="ghp_secret",
+            github_host="github.com",
+            token_in_environment=True,
+        )
+        assert len(captured_runs) == 1
+        cmd = captured_runs[0]["cmd"]
+        env = captured_runs[0]["kwargs"]["env"]
+        assert cmd[-2] == "https://github.com/org/myrepo"
+        assert all("ghp_secret" not in str(value) for value in cmd)
+        assert env["VULNHUNT_GIT_TOKEN"] == "ghp_secret"
+        assert "ghp_secret" not in env["GIT_CONFIG_VALUE_0"]
+        assert "${VULNHUNT_GIT_TOKEN}" in env["GIT_CONFIG_VALUE_0"]
+
     def test_url_redacted_in_error_message(
         self,
         tmp_path: Path,

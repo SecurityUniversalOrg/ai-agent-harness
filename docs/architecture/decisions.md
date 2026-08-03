@@ -22,6 +22,7 @@ history. Maintainers can split them into numbered ADRs if they want an approval 
 | IADR-011 | Retry inference only where restart cannot discard useful work | Observed |
 | IADR-012 | Customize deployments through config/env and wrapper processes instead of source forks | Observed |
 | IADR-013 | Verify fixes through four independent static gates and defer exploit replay | Observed |
+| IADR-014 | Automate remediation only through an isolated fork profile with recorded checkpoints | Observed |
 
 ## IADR-001: Separate methodology skills from the headless runtime
 
@@ -263,3 +264,31 @@ be `INCONCLUSIVE` rather than assumed safe.
 **Evidence.** [`vulnhunt-fix-verify/SKILL.md`](../../vulnhunt-fix-verify/SKILL.md),
 [`phase2_verify.md`](../../vulnhunt-fix-verify/phases/phase2_verify.md), and
 [`phase4_emit.md`](../../vulnhunt-fix-verify/phases/phase4_emit.md).
+
+## IADR-014: Automate remediation through an isolated fork profile
+
+**Context.** The remediation methodology contains high-value interactive safeguards:
+phase approvals, human resolution of public-interface and cross-repository decisions,
+and an uncapped repair loop. A fleet agent cannot wait for those interactions, but
+simply instructing it to “skip confirmations” would conflict with the skill and could
+also skip the artifact checks that make those checkpoints safe.
+
+**Decision.** Add an explicit `VULNFIX_AUTOMATED=1` execution profile layered only on
+fork mode. Start it in a unique non-git scratch directory with explicit target/report
+inputs and a run-scoped config. Replace only the human approval action with a recorded,
+artifact-validated checkpoint. Bound repair; route true human choices to structured
+terminal outcomes; keep delivery private-fork-only; provide a zero-GitHub-mutation
+`--no-post` profile; require a schema- and semantically validated final disposition.
+
+**Consequences.** Remediation can run unattended without pretending the interactive
+in-place collaboration loop is autonomous. Delivery-enabled execution has substantially
+more authority than scan/verify—Bash, untrusted tests, and a GitHub delivery token—so it
+requires an ephemeral worker, least-privilege credentials, narrow egress, durable
+evidence, and preferably an independent post-session reconciliation step. `--no-post`
+pre-clones the target in Python and then withholds GitHub credentials/default egress from
+the model. Prompt and Python tests must keep the automated profile synchronized.
+
+**Evidence.** [`agent/fix.py`](../../vulnhunter-agent/agent/fix.py),
+[`agent/fix_runner.py`](../../vulnhunter-agent/agent/fix_runner.py),
+[`fix_disposition.schema.json`](../../vulnhunter-agent/agent/schemas/fix_disposition.schema.json),
+and [`vulnhunter-fix/SKILL.md`](../../vulnhunter-fix/SKILL.md).

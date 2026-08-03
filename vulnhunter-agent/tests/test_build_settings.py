@@ -17,6 +17,46 @@ from agent.config import (
 )
 
 
+def test_mode_specific_env_and_sandbox_extensions_are_additive(
+    populated_agent_config: AgentConfig,
+) -> None:
+    settings = json.loads(
+        build_claude_settings(
+            populated_agent_config,
+            "oauth-token",
+            model=populated_agent_config.anthropic.model,
+            extra_env={"GH_TOKEN": "github-token", "VULNFIX_AUTOMATED": "1"},
+            sandbox_allowed_domains=["github.com", "api.github.com"],
+            sandbox_allow_read_paths=["/opt/skills/vulnhunter-fix"],
+        )
+    )
+    assert settings["env"]["GH_TOKEN"] == "github-token"
+    assert settings["env"]["VULNFIX_AUTOMATED"] == "1"
+    assert "github.com" in settings["sandbox"]["network"]["allowedDomains"]
+    assert "api.github.com" in settings["sandbox"]["network"]["allowedDomains"]
+    assert (
+        "/opt/skills/vulnhunter-fix"
+        in settings["sandbox"]["filesystem"]["allowRead"]
+    )
+
+
+def test_mode_can_force_strict_sandbox(
+    populated_agent_config: AgentConfig,
+) -> None:
+    settings = json.loads(
+        build_claude_settings(
+            populated_agent_config,
+            "oauth-token",
+            model=populated_agent_config.anthropic.model,
+            strict_sandbox=True,
+        )
+    )
+    sandbox = settings["sandbox"]
+    assert sandbox["enabled"] is True
+    assert sandbox["failIfUnavailable"] is True
+    assert sandbox["allowUnsandboxedCommands"] is False
+
+
 # ---------------------------------------------------------------------------
 # _build_sandbox
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 Status: source-derived current-state documentation
 
-Analyzed snapshot: 2026-08-01
+Analyzed snapshot: 2026-08-02
 
 Primary audience: security engineering, platform engineering, maintainers, and operators
 
@@ -28,6 +28,7 @@ one notation:
 Related documents:
 
 - [Runtime views](runtime-views.md)
+- [Automated fix-mode architecture](automated-fix-mode.md)
 - [Architecture decisions](decisions.md)
 - [Quality attributes, threats, and risks](quality-and-risks.md)
 
@@ -40,9 +41,9 @@ VulnHunter is a security-finding lifecycle composed of four cooperating subsyste
    PoCs and exploit tests, sweeps for sibling instances, and compiles a Markdown
    report. It does not patch target source.
 2. **`vulnhunter-agent` runtime** — a Python 3.12 command-line application that
-   clones targets, launches the audit or verify skill through the Claude Agent SDK,
-   publishes reports, deduplicates and opens GitHub issues, emits audit JSONL, and
-   writes schema-validated machine contracts.
+   clones targets, launches the audit, remediation, or verify skill through the Claude
+   Agent SDK, publishes reports, deduplicates and opens GitHub issues, emits audit
+   JSONL, and writes schema-validated machine contracts.
 3. **`vulnhunter-fix` remediation skill** — prompt orchestration plus Python/shell
    helpers that ingest findings, plan and implement TDD fixes, analyze callers with
    an AST graph or grep fallback, sweep root causes, run fail-closed delivery gates,
@@ -78,8 +79,9 @@ engines around those artifacts.
 - The audit skill does not edit the scanned application.
 - The Python agent is not a multi-tenant scheduler, queue consumer, web service, or
   report database. An outer platform must supply those concerns if needed.
-- Remediation is not fully autonomous across phase boundaries; the interactive
-  skill requires operator approval between phases.
+- Interactive remediation requires operator approval between phases. Agent fix mode
+  automates only the isolated fork profile and replaces approval with recorded,
+  artifact-validated checkpoints.
 - Static fix verification does not replay exploit tests in the current v1
   disposition contract.
 
@@ -133,8 +135,9 @@ flowchart LR
   configured model, while interactive skills enforce or request an operator choice.
 - The agent requires Python 3.12+, `git`, the Claude Agent SDK, and installed user
   skills. The remediation helper package requires Python 3.11+ and `git`/`gh`.
-- Scan mode accepts one repository per process. Verify mode accepts multiple issue
-  URLs only when they are homogeneous for repository and originating results set.
+- Scan mode accepts one repository per process. Fix mode accepts one target plus one
+  local or remote report. Verify mode accepts multiple issue URLs only when they are
+  homogeneous for repository and originating results set.
 - GitHub is the implemented collaboration system; hosts are configurable for GHE.
 - Read-only scanning is the default. Bash becomes visible only when the operator
   supplies the paired `--no-read-only --enable-bash` flags.
@@ -186,6 +189,7 @@ flowchart TB
     operator --> fixSkill
 
     agent -->|Claude Agent SDK| auditSkill
+    agent -->|Claude Agent SDK automated fork profile| fixSkill
     agent -->|Claude Agent SDK| verifySkill
     agent --> contracts
     fixSkill --> contracts
@@ -209,12 +213,12 @@ flowchart TB
 | Container | Primary responsibility | Key implementation |
 |---|---|---|
 | Audit skill | Orchestrate recon, parallel hunts, adversarial verification, reproduction, sweep, report | [`vulnhunt/SKILL.md`](../../vulnhunt/SKILL.md), [`vulnhunt/phases/`](../../vulnhunt/phases/) |
-| Headless agent | Run scan/verify workflows and integrate with external systems | [`agent/__main__.py`](../../vulnhunter-agent/agent/__main__.py) |
+| Headless agent | Run scan, automated fix, and verify workflows and integrate with external systems | [`agent/__main__.py`](../../vulnhunter-agent/agent/__main__.py) |
 | Fix-verification skill | Independently inspect the fixed checkout, evaluate comments as untrusted claims, run four static gates, and emit per-finding verdicts | [`vulnhunt-fix-verify/SKILL.md`](../../vulnhunt-fix-verify/SKILL.md), [`comment_rules.md`](../../vulnhunt-fix-verify/comment_rules.md), [`phases/`](../../vulnhunt-fix-verify/phases/) |
 | Remediation skill | Parse, plan, implement, verify, sweep, and deliver fixes | [`vulnhunter-fix/SKILL.md`](../../vulnhunter-fix/SKILL.md), [`prompts/`](../../vulnhunter-fix/prompts/) |
 | Remediation helper library | Stable graph schema/query layer and delivery rendering/guards | [`vulnhunter_fix/`](../../vulnhunter-fix/vulnhunter_fix/) |
 | Helper scripts | Deterministic validation, dispatch, worktree, parsing, scoring, graph, and gate operations | [`vulnhunter-fix/scripts/`](../../vulnhunter-fix/scripts/) |
-| Contract set | Fail-closed exchange formats across agents and phases | [`scan_manifest.schema.json`](../../vulnhunter-agent/scan_manifest.schema.json), [`verify_disposition.schema.json`](../../vulnhunter-agent/verify_disposition.schema.json), [`references/`](../../vulnhunter-fix/references/) |
+| Contract set | Fail-closed exchange formats across agents and phases | [`scan_manifest.schema.json`](../../vulnhunter-agent/scan_manifest.schema.json), [`fix_disposition.schema.json`](../../vulnhunter-agent/agent/schemas/fix_disposition.schema.json), [`verify_disposition.schema.json`](../../vulnhunter-agent/verify_disposition.schema.json), [`references/`](../../vulnhunter-fix/references/) |
 
 ## 8. Headless-agent component view (C4 level 3)
 
@@ -226,6 +230,7 @@ flowchart LR
     tokens["GitHub role tokens\ntoken_client.py"]
     clone["Checkout adapters\nclone.py + verify_resolve.py"]
     scan["Scan SDK runner\nrunner.py"]
+    fix["Fix orchestrator\nfix.py + fix_runner.py"]
     verify["Verify orchestrator\nverify*.py"]
     extract["Finding extraction\nissues_extract.py"]
     dedup["Issue dedup\nissues_fetch.py + issues_dedup.py"]
@@ -239,8 +244,11 @@ flowchart LR
     config --> tokens
     cli --> clone
     cli --> scan
+    cli --> fix
     cli --> verify
     scan --> auth
+    fix --> auth
+    fix --> tokens
     verify --> auth
     clone --> tokens
     scan --> extract
@@ -278,7 +286,7 @@ See [the scan runtime view](runtime-views.md#scan-runtime).
 
 ### 9.2 Headless agent
 
-The CLI has two explicit modes:
+The CLI has three explicit modes:
 
 - `scan`: validate stage combinations and role credentials, clone or reuse a checkout,
   run the audit, optionally publish, optionally create issues, emit audit records, and
@@ -287,6 +295,10 @@ The CLI has two explicit modes:
   inputs, stage a target checkout and named report, resolve cross-repository evidence,
   run the verification skill once, validate its disposition, comment, and reopen when
   appropriate.
+- `fix`: validate an HTTPS target on the configured GitHub host, stage a bounded report
+  into a unique non-git run directory, drive the remediation skill's automated fork
+  profile, and schema/semantically validate its final disposition. Delivery is
+  private-fork-only; `--no-post` is a zero-GitHub-mutation local evidence run.
 
 The short-lived JSON-only LLM client used for extraction and semantic comparison has
 no tools or skills. It retries typed transient failures and may fall back to a second
@@ -345,6 +357,12 @@ sweep, and deliver. A seven-gate Python orchestrator validates severity disclosu
 body completeness, file scope, idempotency, anti-merge rules when applicable, caller
 coverage in the verification table, and committed test naming.
 
+The headless agent adds an **automated execution profile** on fork mode. It is activated
+only by `VULNFIX_AUTOMATED=1`, consumes a run-scoped config, records validated phase
+checkpoints instead of calling `AskUserQuestion`, bounds repair, and routes genuine
+human decisions to explicit terminal outcomes. See
+[Automated fix-mode architecture](automated-fix-mode.md).
+
 ### 9.5 Graph subsystem
 
 The remediation graph adapter isolates callers from the optional `graphifyy` package:
@@ -382,6 +400,7 @@ to avoid sandbox failures in process-pool initialization.
 | `phase0_state.json` | Fix-verification phase 0 | Later verification phases | Internal run state: target identity, trusted roots, R0–R7 claim evaluation, missing/present IDs, and limitation flags |
 | `disposition_VULN-NNN.json` | Fix-verification phase 2 | Fix-verification phase 4 | One four-gate verdict per report-backed finding; missing report IDs become phase-4 `INVALID_INPUT` stubs |
 | `verify_disposition.json` v1 | Fix-verification phase 4 | Python verify orchestrator | Skill performs shape review; agent performs JSON Schema validation and exact requested-finding reconciliation before GitHub mutation |
+| `fix_disposition.json` v1 | Automated remediation skill | Python fix orchestrator / outer scheduler | JSON Schema plus exact target/report/policy, unique finding/checkpoint, complete-success-phase, and VERIFIED-gate semantic checks |
 | Finding/triage/fix-plan/result schemas | Remediation phases and helpers | Later remediation phases and delivery gates | JSON Schema; cross-field constraints encode completeness tier, residual risk, discrimination evidence, and graph confidence |
 | `graph.json` v1 | Graph adapter | `GraphQuery` and sidecar builder | Stable wrapper schema with content hash, backend, confidence, nodes, and edges |
 | JSONL audit and findings streams | Agent | External log/analytics pipeline | Append-only events with redaction and optional strict write behavior |
@@ -403,10 +422,10 @@ flowchart TB
         sdk["Claude Agent SDK + bundled CLI"]
         skills["Installed user skills\nvulnhunt · vulnhunt-fix-verify · vulnhunter-fix"]
         broker["Optional broker token files\nscan.json · reports.json"]
-        fs["Local storage\nclones · results · verify_runs · worktrees"]
+        fs["Local storage\nclones · results · fix_runs · verify_runs · worktrees"]
 
         subgraph sandbox["Claude Code tool sandbox, when enabled"]
-            tools["Strict model tool allow-list\nrepo-local read/write\nrestricted inference egress"]
+            tools["Mode-specific strict tool allow-list\ncontained read/write\nrestricted egress"]
         end
 
         wrapper --> py
@@ -437,7 +456,7 @@ flowchart TB
 | Variant | Characteristics |
 |---|---|
 | Interactive | Operator invokes `/vulnhunt` or `/vulnhunter-fix` from Claude Code; skills enforce model/mode/phase choices |
-| Standalone agent | TOML and/or environment variables provide credentials and policy; process returns a documented exit code |
+| Standalone agent | TOML and/or environment variables provide credentials and policy; process returns documented scan, fix, or verify outcomes |
 | Derived container | Base image contains Python package, Claude runtime, and installed skills; derived image adds environment-specific config, CA, and telemetry |
 | Brokered worker | Parent process refreshes role tokens as atomic JSON files; the agent resolves each token at use/request time |
 
@@ -485,8 +504,9 @@ and report publication to a separate private repository.
 
 Agent configuration resolves in this order: explicit `--config`,
 `VULNHUNT_AGENT_CONFIG`, colocated `agent/config.toml`, then environment overlays named
-`VULNHUNT_<SECTION>_<KEY>`. Environment values win over TOML. Remediation has a separate
-`config.json` plus a small set of host/base-branch environment overrides.
+`VULNHUNT_<SECTION>_<KEY>`. Environment values win over TOML. Interactive remediation
+uses its skill-local `config.json`; automated remediation overlays the agent-generated
+`vulnfix-runtime-config.json` through `VULNFIX_CONFIG_PATH`.
 
 ## 13. Source map
 
@@ -498,6 +518,7 @@ Use these files as the fastest path from an architecture question to code:
 | Configuration validation | [`agent/config.py`](../../vulnhunter-agent/agent/config.py) and [`config.example.toml`](../../vulnhunter-agent/agent/config.example.toml) |
 | Inference authentication and sandbox | [`agent/auth.py`](../../vulnhunter-agent/agent/auth.py), [`agent/build_settings.py`](../../vulnhunter-agent/agent/build_settings.py) |
 | Scan SDK session and continuation handling | [`agent/runner.py`](../../vulnhunter-agent/agent/runner.py) |
+| Automated fix containment and orchestration | [`agent/fix.py`](../../vulnhunter-agent/agent/fix.py), [`agent/fix_runner.py`](../../vulnhunter-agent/agent/fix_runner.py), [`fix_disposition.schema.json`](../../vulnhunter-agent/agent/schemas/fix_disposition.schema.json) |
 | Report publication | [`agent/publish.py`](../../vulnhunter-agent/agent/publish.py) |
 | Finding extraction and issue lifecycle | [`agent/issues_extract.py`](../../vulnhunter-agent/agent/issues_extract.py), [`agent/issues_dedup.py`](../../vulnhunter-agent/agent/issues_dedup.py), [`agent/issues.py`](../../vulnhunter-agent/agent/issues.py) |
 | Verify orchestration | [`agent/verify.py`](../../vulnhunter-agent/agent/verify.py), [`agent/verify_runner.py`](../../vulnhunter-agent/agent/verify_runner.py) |

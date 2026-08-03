@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/capitalone/vulnhunter/schemas/fix_disposition.schema.json",
+  "title": "VulnHunter automated fix disposition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_status",
+    "target_repo",
+    "report_path",
+    "delivery_enabled",
+    "phase_checkpoints",
+    "findings",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_status": {
+      "type": "string",
+      "enum": ["COMPLETED", "PARTIAL", "FAILED", "DRY_RUN", "NO_FINDINGS"]
+    },
+    "target_repo": {"type": "string", "minLength": 1},
+    "report_path": {"type": "string", "minLength": 1},
+    "delivery_enabled": {"type": "boolean"},
+    "fork_repository": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "tracking_issue_url": {
+      "type": ["string", "null"],
+      "format": "uri",
+      "pattern": "^https://\\S+$"
+    },
+    "phase_checkpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["phase", "status", "artifacts", "detail"],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": ["parse", "plan", "implement", "verify", "sweep", "deliver"]
+          },
+          "status": {"type": "string", "enum": ["validated", "failed", "not_run"]},
+          "artifacts": {"type": "array", "items": {"type": "string"}},
+          "detail": {"type": "string"}
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["vuln_id", "status", "detail", "gate_status"],
+        "properties": {
+          "vuln_id": {"type": "string", "pattern": "^VULN-\\d+$"},
+          "status": {
+            "type": "string",
+            "enum": [
+              "VERIFIED",
+              "VERIFIED_FULL",
+              "VERIFIED_MITIGATION",
+              "VERIFIED_WORKAROUND",
+              "ALREADY_FIXED",
+              "CANNOT_AUTO_FIX",
+              "NEEDS_MANUAL_REVIEW",
+              "REQUIRES_HUMAN_DECISION",
+              "BREAKING_CHANGE",
+              "FAILED",
+              "DELIVERY_FAILED"
+            ]
+          },
+          "detail": {"type": "string"},
+          "cwe": {"type": ["string", "null"], "pattern": "^CWE-\\d+$"},
+          "completeness_tier": {
+            "type": ["string", "null"],
+            "enum": ["FULL", "MITIGATION", "WORKAROUND", null]
+          },
+          "branch": {"type": ["string", "null"]},
+          "commit_sha": {"type": ["string", "null"]},
+          "issue_url": {
+            "type": ["string", "null"],
+            "format": "uri",
+            "pattern": "^https://\\S+$"
+          },
+          "pr_url": {
+            "type": ["string", "null"],
+            "format": "uri",
+            "pattern": "^https://\\S+$"
+          },
+          "gate_status": {"type": "string", "enum": ["PASS", "FAIL", "NOT_RUN"]},
+          "residual_vectors": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "summary": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"run_status": {"const": "DRY_RUN"}}},
+      "then": {"properties": {"delivery_enabled": {"const": false}}}
+    },
+    {
+      "if": {"properties": {"delivery_enabled": {"const": false}}},
+      "then": {
+        "properties": {
+          "tracking_issue_url": {"type": "null"},
+          "findings": {
+            "items": {
+              "properties": {
+                "issue_url": {"type": "null"},
+                "pr_url": {"type": "null"}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

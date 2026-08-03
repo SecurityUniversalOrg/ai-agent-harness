@@ -1,6 +1,4 @@
-"""CLI entrypoint: ``--mode=scan`` clones a repo and runs /vulnhunt;
-``--mode=verify`` reacts to a list of GitHub issues by running
-/vulnhunt-fix-verify against the supplied finding.
+"""CLI entrypoint for scan, unattended fix, and fix-verification workflows.
 
 Usage (scan mode):
     python -m agent --mode=scan <repo-url> [--config PATH] [--model MODEL]
@@ -25,6 +23,13 @@ Usage (verify mode):
                                               [audit flags as above]
                                               [-v | -vv]
 
+Usage (fix mode):
+    python -m agent --mode=fix <repo-url> <results-path-or-repo-url>
+                                           [--config PATH] [--model OPUS_MODEL]
+                                           [--scratch-dir DIR] [--no-post]
+                                           [--test-policy POLICY]
+                                           [-v | -vv]
+
 ``--mode`` is required — there is no implicit default. Old-style
 invocations like ``python -m agent <repo-url>`` fail with a clear
 parser error.
@@ -47,6 +52,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
@@ -83,8 +89,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m agent",
         description=(
-            "Clone a GitHub repo and run /vulnhunt (--mode=scan), or "
-            "react to a list of closed issues with /vulnhunt-fix-verify "
+            "Run a VulnHunter scan (--mode=scan), remediate a report "
+            "unattended (--mode=fix), or verify fixes from closed issues "
             "(--mode=verify)."
         ),
     )
@@ -97,21 +103,20 @@ def _build_parser() -> argparse.ArgumentParser:
         # deliberate breaking change from the pre-verify CLI.
         required=False,
         default=None,
-        choices=("scan", "verify"),
+        choices=("scan", "fix", "verify"),
         help=(
-            "Required. 'scan' runs the existing scanner against a repo URL. "
-            "'verify' runs the fix-verify agent against one or more issue URLs."
+            "Required. 'scan' audits one repo URL; 'fix' remediates one repo "
+            "from one results path/URL; 'verify' evaluates one or more issue URLs."
         ),
     )
-    # In scan mode this is the repo URL (exactly one). In verify mode this
-    # is one or more issue URLs. We use nargs="+" and validate the count
-    # in main() once we know which mode is in effect.
+    # Mode-specific arity is validated in main(): scan=1, fix=2, verify=1+.
     parser.add_argument(
         "targets",
         nargs="+",
         help=(
-            "Positional argument(s). In --mode=scan: exactly one git repo URL. "
-            "In --mode=verify: one or more full GitHub issue URLs."
+            "Positional argument(s). scan: one repo URL; fix: target repo URL "
+            "then local results directory or results-repo URL; verify: one or "
+            "more full GitHub issue URLs."
         ),
     )
     parser.add_argument(
@@ -246,7 +251,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "read-only scans (the model is told not to execute code anyway).",
     )
 
-    # ---- verify-mode flags -----------------------------------------------
+    # ---- verify/fix-mode flags -------------------------------------------
 
     verify_section = parser.add_argument_group("verify-mode options")
     verify_section.add_argument(
@@ -255,20 +260,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pin the target repo to a specific commit SHA instead of "
         "default-branch HEAD. Applies to all issues in the run.",
     )
-    verify_section.add_argument(
+    shared_fix_verify = parser.add_argument_group("fix/verify-mode options")
+    shared_fix_verify.add_argument(
         "--scratch-dir",
         default=None,
-        help="Override verify.scratch_base_dir from config.",
+        help="Override verify.scratch_base_dir or fix.scratch_base_dir.",
     )
-    verify_section.add_argument(
+    shared_fix_verify.add_argument(
         "--no-post",
         action="store_true",
-        help="Dry-run mode: run verify but don't post comments or reopen issues.",
+        help="Dry-run mode: verify does not update issues; fix performs no "
+        "mutating GitHub operation and retains local remediation artifacts.",
     )
     verify_section.add_argument(
         "--no-reopen",
         action="store_true",
         help="Post comments but don't reopen issues on non-FIXED verdicts.",
+    )
+
+    fix_section = parser.add_argument_group("fix-mode options")
+    fix_section.add_argument(
+        "--test-policy",
+        choices=("best-effort", "must-pass", "skip"),
+        default=None,
+        help="Override fix.test_policy for regression execution. The finding's "
+        "security test still runs under every policy.",
     )
 
     # ---- shared logging --------------------------------------------------
@@ -1146,6 +1162,61 @@ async def _amain_verify(args: argparse.Namespace) -> int:
             audit_writer.close()
 
 
+async def _amain_fix(args: argparse.Namespace) -> int:
+    """Fix-mode entrypoint: load policy and drive automated fork remediation."""
+    from . import fix as fix_module
+
+    config = load_config(args.config)
+    logging.info("Loaded config from %s", config.source_path)
+    if args.verbose >= 1:
+        config = dataclasses.replace(
+            config,
+            logging=dataclasses.replace(
+                config.logging,
+                per_turn_usage=True,
+                retries=True,
+            ),
+        )
+
+    model = args.model or config.anthropic.model
+    if "opus" not in model.lower():
+        raise ValueError(
+            "--mode=fix requires an Opus model because the remediation skill's "
+            "planning, patch synthesis, and bounded repair workflow are calibrated "
+            f"for Opus; got {model!r}."
+        )
+
+    # Fix always needs the scan identity, including --no-post: it clones the target
+    # and performs read-only repo/access checks.  Standalone mode validates the token
+    # before the expensive SDK session; broker mode was validated by the parent.
+    if not config.github.broker_token_dir:
+        results_scheme = urlparse(args.targets[1]).scheme.lower()
+        _preflight_standalone_tokens(
+            config=config,
+            scan=True,
+            # Reuse the established role calculation: publish=True adds the
+            # reports identity, which remote report staging needs. A local report
+            # needs only the scan identity used for target/fork operations.
+            publish=results_scheme in ("http", "https"),
+            issues=True,
+        )
+
+    scratch_dir = (
+        Path(args.scratch_dir).expanduser().resolve()
+        if args.scratch_dir
+        else None
+    )
+    return await fix_module.run_fix(
+        config=config,
+        target_repo=args.targets[0],
+        results_input=args.targets[1],
+        scratch_base_dir=scratch_dir,
+        no_post=args.no_post,
+        test_policy_override=args.test_policy,
+        model_override=args.model,
+    )
+
+
 def _issue_url_to_repo_url(issue_url: str) -> str:
     """Convert ``https://github.com/o/r/issues/N`` → ``https://github.com/o/r``.
 
@@ -1222,7 +1293,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- --mode is required (friendlier than argparse's default) ---------
     if args.mode is None:
-        parser.error("--mode is required; choose scan or verify")
+        parser.error("--mode is required; choose scan, fix, or verify")
 
     # ---- Mode-specific positional + flag validation -----------------------
     if args.mode == "scan":
@@ -1237,11 +1308,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.commit is not None:
             parser.error("--commit is verify-mode only.")
         if args.scratch_dir is not None:
-            parser.error("--scratch-dir is verify-mode only.")
+            parser.error("--scratch-dir is fix/verify-mode only.")
         if args.no_post:
-            parser.error("--no-post is verify-mode only.")
+            parser.error("--no-post is fix/verify-mode only.")
         if args.no_reopen:
             parser.error("--no-reopen is verify-mode only.")
+        if args.test_policy is not None:
+            parser.error("--test-policy is fix-mode only.")
 
         # Validate the --enable-bash / --no-read-only pairing before any
         # subsequent setup (logging, config load, clone) — the policy lives
@@ -1263,7 +1336,7 @@ def main(argv: list[str] | None = None) -> int:
                     "is the tool that runs the exploit tests. Pass both "
                     "flags together to opt in."
                 )
-    else:  # verify
+    elif args.mode == "verify":
         # Reject scan-only flags when used with verify mode.
         scan_only_flags = []
         if args.clone_dir is not None:
@@ -1284,10 +1357,62 @@ def main(argv: list[str] | None = None) -> int:
             scan_only_flags.append("--read-only/--no-read-only")
         if args.enable_bash:
             scan_only_flags.append("--enable-bash")
+        if args.test_policy is not None:
+            scan_only_flags.append("--test-policy")
         if scan_only_flags:
             parser.error(
-                "These flags are scan-mode only and cannot be used with "
-                "--mode=verify: " + ", ".join(scan_only_flags)
+                "These flags cannot be used with --mode=verify: "
+                + ", ".join(scan_only_flags)
+            )
+    else:  # fix
+        if len(args.targets) != 2:
+            parser.error(
+                f"--mode=fix takes exactly two positional arguments "
+                f"(target repo URL and results path/URL); got {len(args.targets)}."
+            )
+        fix_invalid_flags = []
+        if args.clone_dir is not None:
+            fix_invalid_flags.append("--clone-dir")
+        if args.re_clone:
+            fix_invalid_flags.append("--re-clone")
+        if args.scan_id:
+            fix_invalid_flags.append("--scan-id")
+        if args.scan is not None:
+            fix_invalid_flags.append("--scan/--no-scan")
+        if args.publish is not None:
+            fix_invalid_flags.append("--publish/--no-publish")
+        if args.issues is not None:
+            fix_invalid_flags.append("--issues/--no-issues")
+        if args.issues_target_repo is not None:
+            fix_invalid_flags.append("--issues-target-repo")
+        if args.notify_clean_scan is not None:
+            fix_invalid_flags.append("--notify-clean-scan/--no-notify-clean-scan")
+        if args.read_only is not None:
+            fix_invalid_flags.append("--read-only/--no-read-only")
+        if args.enable_bash:
+            fix_invalid_flags.append("--enable-bash")
+        if args.commit is not None:
+            fix_invalid_flags.append("--commit")
+        if args.no_reopen:
+            fix_invalid_flags.append("--no-reopen")
+        if args.audit is not None:
+            fix_invalid_flags.append("--audit/--no-audit")
+        if args.audit_events_path is not None:
+            fix_invalid_flags.append("--audit-events-path")
+        if args.audit_findings_path is not None:
+            fix_invalid_flags.append("--audit-findings-path")
+        if args.audit_stdout is not None:
+            fix_invalid_flags.append("--audit-stdout/--no-audit-stdout")
+        if args.app_id is not None:
+            fix_invalid_flags.append("--app-id")
+        if args.audit_actor is not None:
+            fix_invalid_flags.append("--audit-actor")
+        if args.repo_property:
+            fix_invalid_flags.append("--repo-property")
+        if fix_invalid_flags:
+            parser.error(
+                "These flags cannot be used with --mode=fix: "
+                + ", ".join(fix_invalid_flags)
             )
 
     _configure_logging(args.log_level, args.verbose)
@@ -1295,6 +1420,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.mode == "verify":
             return asyncio.run(_amain_verify(args))
+        if args.mode == "fix":
+            return asyncio.run(_amain_fix(args))
         return asyncio.run(_amain(args))
     except KeyboardInterrupt:
         logging.warning("Interrupted by user")

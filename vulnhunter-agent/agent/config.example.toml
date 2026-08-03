@@ -13,6 +13,9 @@
 #     VULNHUNT_ANTHROPIC_MODEL
 #     VULNHUNT_GITHUB_SCAN_TOKEN
 #     VULNHUNT_GITHUB_REPORTS_TOKEN
+#     VULNHUNT_FIX_FORK_ORG
+#     VULNHUNT_FIX_TEST_POLICY
+#     VULNHUNT_FIX_ALLOWED_DOMAINS (comma-separated)
 #     VULNHUNT_SANDBOX_ENABLED       (true/false)
 #     VULNHUNT_SCAN_ALLOWED_TOOLS    (comma-separated)
 
@@ -210,6 +213,40 @@ clone_timeout_seconds = 300
 [verify.repo_aliases]
 # "platform-validators" = "https://github.com/your-org/platform-validators.git"
 # "shared-libs" = "git@github.com:your-org/shared-libs.git"
+
+[fix]
+# Inputs for `--mode=fix`. The agent always runs the remediation skill's
+# isolated fork/headless profile: the upstream target is never mutated. Use
+# `--no-post` to prohibit every mutating GitHub operation while still producing
+# local branches, evidence, rendered delivery bodies, and gate results.
+scratch_base_dir = "./fix_runs"
+clone_timeout_seconds = 300
+# Optional explicit installed skill directory. Blank searches the standard
+# ~/.claude/skills/vulnhunter-fix locations.
+skill_dir = ""
+# Blank creates the private fork under the authenticated user's account.
+fork_org = ""
+fork_prefix = "vulnhunter-fix"
+default_base_branch = "main"
+pr_draft = true
+pr_labels = ["security", "vulnhunter-fix"]
+# Entries use username:role; role is admin, write, or read.
+collaborators = []
+max_repair_attempts = 3
+test_timeout_seconds = 120
+# best-effort: environment errors become an explicit manual-validation banner;
+# must-pass: any regression-suite/environment failure blocks; skip: do not run the
+# regression suite (the per-finding RED/GREEN security test still runs).
+test_policy = "best-effort"
+# Extra sandbox egress for repository-specific package registries/proxies. The
+# configured GitHub and inference hosts are always added automatically.
+allowed_domains = []
+# Preserve the skill's local clone/evidence after completion for unattended-run
+# forensics. Set false only when the remote private fork is the desired sole record.
+keep_workdir = true
+# Bounds applied while copying the report into the contained run directory.
+max_report_files = 10000
+max_report_bytes = 500000000
 
 # Optional operator-defined metadata tags stamped onto emitted findings
 # records. `github_property_map` maps a GitHub custom-property name (from

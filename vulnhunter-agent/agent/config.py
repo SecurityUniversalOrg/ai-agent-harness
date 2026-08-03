@@ -15,6 +15,9 @@ Env-var convention: ``VULNHUNT_<SECTION>_<KEY>`` (uppercase). Examples:
     VULNHUNT_GITHUB_SCAN_TOKEN
     VULNHUNT_GITHUB_REPORTS_TOKEN
     VULNHUNT_GITHUB_BROKER_TOKEN_DIR
+    VULNHUNT_FIX_FORK_ORG
+    VULNHUNT_FIX_TEST_POLICY
+    VULNHUNT_FIX_ALLOWED_DOMAINS
     VULNHUNT_TLS_SSL_CERT_PATH
 
 The TOML file path is resolved from --config, then ``$VULNHUNT_AGENT_CONFIG``,
@@ -25,6 +28,7 @@ every required value is supplied via env vars.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -297,6 +301,46 @@ class VerifyConfig:
 
 
 @dataclass(frozen=True)
+class FixConfig:
+    """Policy for the unattended ``--mode=fix`` remediation runner.
+
+    Fix mode deliberately drives the remediation skill's fork/headless path.  The
+    target checkout and report are therefore staged beneath a run-specific scratch
+    directory, never in the caller's current repository.  GitHub delivery remains
+    confined to a private fork; ``--no-post`` further reduces the run to local
+    branches, evidence, and delivery-gate validation.
+    """
+
+    scratch_base_dir: str = "./fix_runs"
+    clone_timeout_seconds: int = 300
+    # Optional explicit installed-skill path. Blank uses the normal Claude user-skill
+    # locations (container path first, then ~/.claude/skills/vulnhunter-fix).
+    skill_dir: str = ""
+    # Blank fork_org means the authenticated GitHub user's account.  Non-blank means
+    # create/reuse the private fork in that organization.
+    fork_org: str = ""
+    fork_prefix: str = "vulnhunter-fix"
+    default_base_branch: str = "main"
+    pr_draft: bool = True
+    pr_labels: tuple[str, ...] = ("security", "vulnhunter-fix")
+    # Each entry is ``username:role`` where role is admin/write/read.
+    collaborators: tuple[str, ...] = ()
+    max_repair_attempts: int = 3
+    test_timeout_seconds: int = 120
+    test_policy: str = "best-effort"
+    # Extra egress needed by repository-specific dependency/test tooling.  The
+    # inference endpoints and configured GitHub host are added automatically.
+    allowed_domains: tuple[str, ...] = ()
+    # The skill normally deletes its clone after successful fork delivery.  Keeping
+    # it is safer for unattended operation because it preserves forensic evidence.
+    keep_workdir: bool = True
+    # Bounds for copying an operator-supplied or cloned report into the trusted run
+    # layout.  Symlinks are rejected independently of these limits.
+    max_report_files: int = 10_000
+    max_report_bytes: int = 500_000_000
+
+
+@dataclass(frozen=True)
 class RepoPropertiesConfig:
     """Optional operator-defined metadata tags stamped onto findings records.
 
@@ -326,6 +370,7 @@ class AgentConfig:
     verify: VerifyConfig
     logging: LoggingConfig
     audit: AuditConfig
+    fix: FixConfig = field(default_factory=FixConfig)
     repo_properties: RepoPropertiesConfig = field(
         default_factory=RepoPropertiesConfig
     )
@@ -861,6 +906,154 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AgentConfig:
         ),
     )
 
+    fix_raw = raw.get("fix", {})
+    fix = FixConfig(
+        scratch_base_dir=str(
+            _resolve(fix_raw, "fix", "scratch_base_dir", default="./fix_runs")
+        ),
+        clone_timeout_seconds=int(
+            _resolve(
+                fix_raw,
+                "fix",
+                "clone_timeout_seconds",
+                kind=int,
+                default=300,
+            )
+        ),
+        skill_dir=str(_resolve(fix_raw, "fix", "skill_dir", default="")).strip(),
+        fork_org=str(_resolve(fix_raw, "fix", "fork_org", default="")).strip(),
+        fork_prefix=str(
+            _resolve(fix_raw, "fix", "fork_prefix", default="vulnhunter-fix")
+        ).strip(),
+        default_base_branch=str(
+            _resolve(fix_raw, "fix", "default_base_branch", default="main")
+        ).strip(),
+        pr_draft=bool(
+            _resolve(fix_raw, "fix", "pr_draft", kind=bool, default=True)
+        ),
+        pr_labels=tuple(
+            str(value).strip()
+            for value in _resolve(
+                fix_raw,
+                "fix",
+                "pr_labels",
+                kind=list,
+                default=["security", "vulnhunter-fix"],
+            )
+            if str(value).strip()
+        ),
+        collaborators=tuple(
+            str(value).strip()
+            for value in _resolve(
+                fix_raw,
+                "fix",
+                "collaborators",
+                kind=list,
+                default=[],
+            )
+            if str(value).strip()
+        ),
+        max_repair_attempts=int(
+            _resolve(
+                fix_raw,
+                "fix",
+                "max_repair_attempts",
+                kind=int,
+                default=3,
+            )
+        ),
+        test_timeout_seconds=int(
+            _resolve(
+                fix_raw,
+                "fix",
+                "test_timeout_seconds",
+                kind=int,
+                default=120,
+            )
+        ),
+        test_policy=str(
+            _resolve(fix_raw, "fix", "test_policy", default="best-effort")
+        ).strip(),
+        allowed_domains=tuple(
+            str(value).strip()
+            for value in _resolve(
+                fix_raw,
+                "fix",
+                "allowed_domains",
+                kind=list,
+                default=[],
+            )
+            if str(value).strip()
+        ),
+        keep_workdir=bool(
+            _resolve(fix_raw, "fix", "keep_workdir", kind=bool, default=True)
+        ),
+        max_report_files=int(
+            _resolve(
+                fix_raw,
+                "fix",
+                "max_report_files",
+                kind=int,
+                default=10_000,
+            )
+        ),
+        max_report_bytes=int(
+            _resolve(
+                fix_raw,
+                "fix",
+                "max_report_bytes",
+                kind=int,
+                default=500_000_000,
+            )
+        ),
+    )
+    if not fix.fork_prefix:
+        raise ValueError("fix.fork_prefix must not be empty")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", fix.fork_prefix):
+        raise ValueError(
+            "fix.fork_prefix may contain only letters, digits, dot, underscore, and hyphen"
+        )
+    if fix.fork_org and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", fix.fork_org):
+        raise ValueError("fix.fork_org is not a valid GitHub owner name")
+    if not fix.default_base_branch:
+        raise ValueError("fix.default_base_branch must not be empty")
+    if (
+        fix.default_base_branch.startswith(("-", "/"))
+        or ".." in fix.default_base_branch
+        or "@{" in fix.default_base_branch
+        or not re.fullmatch(r"[A-Za-z0-9._/-]+", fix.default_base_branch)
+    ):
+        raise ValueError("fix.default_base_branch is not a safe git branch name")
+    if fix.max_repair_attempts < 1:
+        raise ValueError("fix.max_repair_attempts must be at least 1")
+    if fix.test_timeout_seconds < 1:
+        raise ValueError("fix.test_timeout_seconds must be at least 1")
+    if fix.test_policy not in ("best-effort", "must-pass", "skip"):
+        raise ValueError(
+            "fix.test_policy must be 'best-effort', 'must-pass', or 'skip'"
+        )
+    if fix.max_report_files < 1 or fix.max_report_bytes < 1:
+        raise ValueError(
+            "fix.max_report_files and fix.max_report_bytes must be positive"
+        )
+    for collaborator in fix.collaborators:
+        username, separator, role = collaborator.rpartition(":")
+        if (
+            not separator
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", username)
+            or role not in ("admin", "write", "read")
+        ):
+            raise ValueError(
+                "fix.collaborators entries must use username:admin|write|read; "
+                f"got {collaborator!r}"
+            )
+    for domain in fix.allowed_domains:
+        if ".." in domain or not re.fullmatch(r"(?:\*\.)?[A-Za-z0-9.-]+(?::\d+)?", domain):
+            raise ValueError(
+                "fix.allowed_domains entries must be hostnames or '*.domain' patterns; "
+                f"got {domain!r}"
+            )
+
     audit_raw = raw.get("audit", {})
     audit = AuditConfig(
         enabled=bool(
@@ -925,6 +1118,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AgentConfig:
         verify=verify,
         logging=logging_cfg,
         audit=audit,
+        fix=fix,
         repo_properties=repo_properties_cfg,
         source_path=config_path,
     )

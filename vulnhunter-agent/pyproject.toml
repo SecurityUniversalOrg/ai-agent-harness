@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "c1-vulnhunter-agent"
 dynamic = ["version"]
-description = "VulnHunter runtime agent: drives the /vulnhunt Claude Code skill, publishes results, and files findings as GitHub issues."
+description = "VulnHunter runtime agent: scans, remediates findings through TDD, verifies fixes, and integrates the lifecycle with GitHub."
 requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -26,6 +26,9 @@ homepage = "https://github.com/capitalone/vulnhunter"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agent*", "vulnhunter*"]
+
+[tool.setuptools.package-data]
+"agent.schemas" = ["*.json"]
 
 [tool.setuptools.dynamic]
 version = { attr = "vulnhunter.__version__" }

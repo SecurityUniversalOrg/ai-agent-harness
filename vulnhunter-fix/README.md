@@ -72,8 +72,9 @@ operator Approve/Pause decision.
    (RED) → fix (GREEN) → confirm the exploit is blocked → regression check → commit.
    No source file is edited until RED evidence exists on disk.
 4. **Verify** — re-run the full RED→GREEN matrix per cluster.
-5. **Deliver** — six mechanical gates (severity mask, body completeness, scope,
-   idempotency, anti-merge, verification table) run before any `gh pr create`.
+5. **Deliver** — seven mechanical gates (severity mask, body completeness, scope,
+   idempotency, anti-merge, verification table, committed-test naming) run before any
+   `gh pr create`.
 
 ## Key principles
 

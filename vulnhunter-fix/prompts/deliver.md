@@ -15,6 +15,22 @@ Push verified fixes to the **fork** and create issues + PRs there. Do NOT create
 
 > **Branch-name examples in fork-mode prose below use the illustrative form `vulnfix/VULN-NNN-...` for readability.** Production fork-mode branches actually follow the masked pattern `fix/code-quality-<descriptor>-<hash8>` per REQ-SEC-002/003 (see `plan_fork.md` Step 3 + `implement.md` fork-mode setup). Substitute the masked name when actually invoking `gh pr create` / `gh pr view`. In-place mode uses `vulnfix/<cluster-slug>` and the examples in the In-place delivery section near the end of this file are literal.
 
+### Automated local dry-run
+
+When `VULNFIX_AUTOMATED=1` and the run-scoped configuration has
+`execution.delivery_enabled=false`, Phase 5 is a render-and-validate phase only:
+
+1. Render every issue/PR/tracking body that the normal fork delivery would use.
+2. Run honesty guards, the description-completeness checks, result validators, and all
+   seven applicable local delivery gates.
+3. Record null issue/PR/tracking URLs, retain all local branches and evidence, and mark
+   the final run `DRY_RUN` only if every required phase checkpoint validated.
+4. Do not execute any mutating `gh` command, fork creation, push, collaborator change,
+   issue operation, PR operation, remote branch deletion, or cleanup that would erase
+   the local evidence.
+
+This is not a gate-skipping path. It changes only the external side effects of delivery.
+
 ## Fork Setup
 
 Before delivering, ensure the fork is properly configured:
@@ -488,4 +504,3 @@ Renderer refuses to ship on: empty `residual_vectors` when tier != FULL (REQ-HON
 - [ ] honesty guards ran at PR-body render time (no hand-wave / empty-residual / FULL-with-residuals)
 - [ ] every required `##` section present per the completeness checklist
 - [ ] `run-gates.py` reported `pass: true` (all seven gates)
-

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Mapping, Sequence
 from urllib.parse import urlparse
 
 from .config import AgentConfig
@@ -99,17 +100,37 @@ def _sandbox_allowed_domains(cfg: AgentConfig) -> list[str]:
     return domains
 
 
-def _build_sandbox(cfg: AgentConfig) -> dict:
-    allowed_domains = _sandbox_allowed_domains(cfg)
+def _dedupe(values: Sequence[str]) -> list[str]:
+    """Return non-empty strings in first-seen order."""
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _build_sandbox(
+    cfg: AgentConfig,
+    *,
+    extra_allowed_domains: Sequence[str] = (),
+    extra_allow_read_paths: Sequence[str] = (),
+    extra_allow_write_paths: Sequence[str] = (),
+    strict: bool = False,
+) -> dict:
+    allowed_domains = _dedupe(
+        [*_sandbox_allowed_domains(cfg), *extra_allowed_domains]
+    )
     return {
-        "enabled": cfg.sandbox.enabled,
-        "failIfUnavailable": cfg.sandbox.fail_if_unavailable,
-        "allowUnsandboxedCommands": cfg.sandbox.allow_unsandboxed_commands,
+        "enabled": True if strict else cfg.sandbox.enabled,
+        "failIfUnavailable": True if strict else cfg.sandbox.fail_if_unavailable,
+        "allowUnsandboxedCommands": (
+            False if strict else cfg.sandbox.allow_unsandboxed_commands
+        ),
         "filesystem": {
             "denyRead": list(_SANDBOX_DENY_READ_PATHS),
-            "allowRead": _sandbox_allow_read_paths(cfg),
+            "allowRead": _dedupe(
+                [*_sandbox_allow_read_paths(cfg), *extra_allow_read_paths]
+            ),
             "denyWrite": list(_SANDBOX_DENY_WRITE_PATHS),
-            "allowWrite": list(_SANDBOX_ALLOW_WRITE_PATHS),
+            "allowWrite": _dedupe(
+                [*_SANDBOX_ALLOW_WRITE_PATHS, *extra_allow_write_paths]
+            ),
         },
         "network": {"allowedDomains": allowed_domains},
     }
@@ -121,6 +142,11 @@ def build_claude_settings(
     *,
     model: str,
     scan_id: str = "",
+    extra_env: Mapping[str, str] | None = None,
+    sandbox_allowed_domains: Sequence[str] = (),
+    sandbox_allow_read_paths: Sequence[str] = (),
+    sandbox_allow_write_paths: Sequence[str] = (),
+    strict_sandbox: bool = False,
 ) -> str:
     """Return a JSON string matching Claude Code's settings file schema."""
     autocompact_pct = resolve_autocompact_pct(
@@ -227,9 +253,22 @@ def build_claude_settings(
     else:
         env["CLAUDE_CODE_ENABLE_TELEMETRY"] = "0"
 
+    # Mode-specific runners may need narrowly-scoped process settings (for
+    # example GH_TOKEN/GH_HOST and a cwd-local TMPDIR in remediation mode).
+    # These are supplied by trusted Python orchestration, never from target
+    # source or model output.
+    if extra_env:
+        env.update({str(key): str(value) for key, value in extra_env.items()})
+
     return json.dumps(
         {
             "env": env,
-            "sandbox": _build_sandbox(cfg),
+            "sandbox": _build_sandbox(
+                cfg,
+                extra_allowed_domains=sandbox_allowed_domains,
+                extra_allow_read_paths=sandbox_allow_read_paths,
+                extra_allow_write_paths=sandbox_allow_write_paths,
+                strict=strict_sandbox,
+            ),
         }
     )

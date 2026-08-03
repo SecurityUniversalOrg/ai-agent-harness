@@ -161,6 +161,60 @@ class TestLoadConfig:
         monkeypatch.setenv("VULNHUNT_OAUTH_CLIENT_ID", "cid")
         monkeypatch.setenv("VULNHUNT_OAUTH_CLIENT_SECRET", "csec")
 
+    def _set_anthropic_aws_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("VULNHUNT_ANTHROPIC_AUTH_MODE", "anthropic_aws")
+        monkeypatch.setenv("VULNHUNT_ANTHROPIC_MODEL", "claude-opus-4-8")
+        monkeypatch.setenv("VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID", "workspace")
+        monkeypatch.setenv("VULNHUNT_ANTHROPIC_AWS_REGION", "us-east-1")
+        monkeypatch.setenv("VULNHUNT_ANTHROPIC_AWS_API_KEY", "api-key")
+
+    def test_fix_config_env_overlay_and_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._set_anthropic_aws_env(monkeypatch)
+        monkeypatch.setenv("VULNHUNT_FIX_FORK_ORG", "security-fixes")
+        monkeypatch.setenv("VULNHUNT_FIX_TEST_POLICY", "must-pass")
+        monkeypatch.setenv("VULNHUNT_FIX_ALLOWED_DOMAINS", "pypi.org, npm.example")
+        from agent import config as cfg_mod
+
+        monkeypatch.setattr(cfg_mod, "_DEFAULT_CONFIG_FILENAME", "no-such.toml")
+        cfg = load_config()
+        assert cfg.fix.fork_org == "security-fixes"
+        assert cfg.fix.test_policy == "must-pass"
+        assert cfg.fix.allowed_domains == ("pypi.org", "npm.example")
+        assert cfg.fix.keep_workdir is True
+        assert cfg.fix.max_repair_attempts == 3
+
+    def test_fix_config_rejects_malformed_collaborator(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._set_anthropic_aws_env(monkeypatch)
+        path = tmp_path / "cfg.toml"
+        path.write_text('[fix]\ncollaborators = ["alice:owner"]\n', encoding="utf-8")
+        with pytest.raises(ValueError, match="username:admin"):
+            load_config(path)
+
+    @pytest.mark.parametrize(
+        ("body", "message"),
+        [
+            ('default_base_branch = "--upload-pack=evil"', "safe git branch"),
+            ('allowed_domains = ["https://evil.example/path"]', "hostnames"),
+            ('fork_prefix = "fix;echo"', "fork_prefix"),
+        ],
+    )
+    def test_fix_config_rejects_unsafe_command_policy_values(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        body: str,
+        message: str,
+    ) -> None:
+        self._set_anthropic_aws_env(monkeypatch)
+        path = tmp_path / "cfg.toml"
+        path.write_text(f"[fix]\n{body}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            load_config(path)
+
     def test_all_from_env_no_toml(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

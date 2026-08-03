@@ -232,7 +232,70 @@ the exploit test. Phase 3 is reserved for future replay. If a delegated finding 
 produce an artifact, the orchestrator retries it once, then emits an `INCONCLUSIVE` stub
 instead of abandoning the whole run.
 
-## Remediation runtime
+## Automated fix runtime
+
+`--mode=fix` is the unattended execution profile for the fork remediation workflow.
+It deliberately starts in a non-git scratch directory and never automates in-place
+changes to a developer checkout.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Caller as Operator or scheduler
+    participant CLI as agent CLI
+    participant Fix as fix orchestrator
+    participant SDK as Claude Agent SDK
+    participant Skill as vulnhunter-fix
+    participant Work as Local remediation work
+    participant GH as Private GitHub fork
+    participant Schema as Fix disposition validator
+
+    Caller->>CLI: mode fix, target, results
+    CLI->>CLI: enforce arity, Opus, and role token
+    CLI->>Fix: start contained run
+    Fix->>Fix: validate target host and repository shape
+    Fix->>Fix: stage bounded report without links
+    opt no-post dry run
+        Fix->>Work: pre-clone target with process-local credential
+        Fix->>Fix: blank model GitHub credentials and default egress
+    end
+    Fix->>Fix: write trusted runtime config
+    Fix->>SDK: start Bash-enabled locked-tool session
+    SDK->>Skill: invoke automated fork profile
+    Skill->>Work: parse and validate findings
+    Skill->>Work: plan fixes and projected completeness
+    Skill->>Work: capture exploit and RED evidence
+    Skill->>Work: implement fix and capture GREEN evidence
+    Skill->>Work: verify, bounded repair, and regressions
+    Skill->>Work: classify completeness and sweep root cause
+    Skill->>Work: render artifacts and run seven gates
+    alt GitHub delivery enabled
+        Skill->>GH: create or reuse private fork
+        Skill->>GH: push masked finding branches
+        Skill->>GH: create or update issues, PRs, and tracking issue
+    else no-post dry run
+        Skill->>Work: use staged checkout and retain branches and evidence
+    end
+    Skill->>Fix: write fix_disposition.json
+    Fix->>Schema: validate schema and process relationships
+    Schema-->>CLI: completed, partial, dry run, no findings, or failed
+    CLI-->>Caller: exit code and forensic paths
+```
+
+Automated phase advancement is conditional: the skill records one checkpoint only
+after the current phase's required artifacts validate. Missing or malformed artifacts
+stop the run. A human-only policy choice is not treated as checkpoint approval; it is
+routed to `CANNOT_AUTO_FIX`, `BREAKING_CHANGE`, or `NEEDS_MANUAL_REVIEW`.
+
+For `--no-post`, the Python layer performs the private-repository clone before the SDK
+session. The model then gets blank GitHub token variables, a disabled Git credential
+helper, and no default GitHub sandbox domains; repository-specific domains remain an
+explicit operator configuration.
+
+See [Automated fix-mode architecture](automated-fix-mode.md) for the staging bounds,
+tool/credential envelope, disposition semantics, and full equivalence map.
+
+## Interactive remediation runtime
 
 ```mermaid
 flowchart TB
@@ -328,4 +391,16 @@ process context rather than infer a complete state machine from the integer alon
 | 1 | Infrastructure/input-shape/SDK/schema/posting failure |
 | 2 | Bad programmatic argument shape; `argparse` also uses 2 for CLI parse errors |
 | 3 | Required GitHub scan identity missing |
+| 130 | Operator interruption handled by the outer CLI |
+
+### Fix-mode exit codes
+
+| Code | Meaning |
+|---:|---|
+| 0 | Valid `COMPLETED`, `DRY_RUN`, or `NO_FINDINGS` disposition |
+| 1 | Staging, SDK, output, schema, semantic, or terminal run failure |
+| 2 | Invalid target/results shape in the fix orchestrator |
+| 3 | Required GitHub scan identity missing |
+| 5 | Valid `PARTIAL` disposition with useful but incomplete work |
+| 64 | Top-level CLI/config usage error, including a non-Opus fix model |
 | 130 | Operator interruption handled by the outer CLI |

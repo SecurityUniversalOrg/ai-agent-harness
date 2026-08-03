@@ -328,7 +328,13 @@ def main():
     check_python()
     check_git()
     check_gh_cli()
-    check_claude_cli()
+    if os.environ.get("VULNFIX_AUTOMATED") == "1":
+        # The skill is already executing inside the Claude Agent SDK's bundled
+        # CLI. Requiring a second standalone `claude` executable on PATH would
+        # reject otherwise valid headless/container deployments.
+        check("Claude Agent SDK session (automated profile)", True)
+    else:
+        check_claude_cli()
 
     print("\nRemediation-rigor (Bundle 2 + 6):")
     check_graphifyy()

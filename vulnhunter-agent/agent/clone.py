@@ -62,6 +62,7 @@ def shallow_clone(
     github_token: str = "",
     github_host: str = "github.com",
     allowed_token_path_prefixes: Iterable[str] | None = None,
+    token_in_environment: bool = False,
 ) -> Path:
     """Shallow-clone repo_url into <clone_base_dir>/<repo_name>.
 
@@ -75,6 +76,11 @@ def shallow_clone(
     (default) applies no path restriction — appropriate for the operator-
     supplied target repo; an iterable restricts token attachment to those
     authorized owner / owner-repo paths.
+
+    Set ``token_in_environment`` to authenticate through a process-local Git
+    credential helper instead of embedding the token in the clone URL. This is
+    preferred for unattended remediation because the secret then appears in
+    neither argv nor the stored remote URL.
     """
     base = Path(clone_base_dir).expanduser().resolve()
     base.mkdir(parents=True, exist_ok=True)
@@ -95,14 +101,39 @@ def shallow_clone(
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
 
-    effective_url = inject_token(
-        repo_url,
-        github_token,
-        github_host,
-        allowed_path_prefixes=allowed_token_path_prefixes,
-    )
-    if effective_url != repo_url:
-        logger.info("  using configured GitHub token for %s", github_host)
+    if token_in_environment and github_token:
+        # Validate host/path scoping with the same centralized helper, but discard
+        # the credential-bearing URL. Git expands the fixed environment variable
+        # only inside the credential-helper child process.
+        scoped_url = inject_token(
+            repo_url,
+            github_token,
+            github_host,
+            allowed_path_prefixes=allowed_token_path_prefixes,
+        )
+        use_environment_token = scoped_url != repo_url
+    else:
+        use_environment_token = False
+
+    if use_environment_token:
+        effective_url = repo_url
+        env["VULNHUNT_GIT_TOKEN"] = github_token
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = f"credential.https://{github_host}.helper"
+        env["GIT_CONFIG_VALUE_0"] = (
+            '!f() { if [ "$1" = get ]; then echo username=x-access-token; '
+            'echo password="${VULNHUNT_GIT_TOKEN}"; fi; }; f'
+        )
+        logger.info("  using process-local GitHub credential for %s", github_host)
+    else:
+        effective_url = inject_token(
+            repo_url,
+            github_token,
+            github_host,
+            allowed_path_prefixes=allowed_token_path_prefixes,
+        )
+        if effective_url != repo_url:
+            logger.info("  using configured GitHub token for %s", github_host)
 
     # CWE-88 guard: refuse a URL git would treat as an option, and pass a
     # '--' end-of-options separator so the URL is always a positional.

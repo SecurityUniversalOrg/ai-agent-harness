@@ -3,8 +3,9 @@
 A config-driven runtime that automates the [`/vulnhunt`](https://github.com/capitalone/vulnhunter)
 scanner **headlessly** — no interactive Claude Code session required. Point it at a
 repository and it will clone the target, run the scanner, publish the results, and file
-each confirmed finding as a GitHub issue. It also has a `verify` mode that drives the
-read-only fix-verification flow.
+each confirmed finding as a GitHub issue. It also has a `fix` mode that executes the
+full TDD remediation lifecycle unattended in a private fork, and a `verify` mode that
+drives the independent read-only fix-verification flow.
 
 It is the automation layer around the skills: the skills define *how* to hunt and fix;
 this agent makes a scan runnable unattended (CI, a scheduled job, a fleet worker, or a
@@ -22,6 +23,9 @@ container) and wires the results into GitHub.
   there are no findings.
 - **Verify** *(`--mode=verify`)* — orchestrate the `/vulnhunt-fix-verify` skill over a
   checkout and post a per-finding verdict.
+- **Fix** *(`--mode=fix`)* — stage a VulnHunter report into an isolated run, drive the
+  `/vulnhunter-fix` fork workflow through RED→GREEN, bounded repair, sweep, seven
+  delivery gates, and private-fork issue/PR delivery.
 
 The agent hardcodes nothing sensitive: every host, credential, and path comes from a
 TOML config file and/or `VULNHUNT_*` environment variables, so the same image runs across
@@ -32,7 +36,10 @@ environments without rebuilding.
 - Python 3.12+.
 - The [Claude Agent SDK](https://docs.claude.com/en/docs/claude-code) (installed as a
   dependency) and the bundled Claude Code CLI it drives.
-- `git` and, for the publish/issues stages, the GitHub CLI or a GitHub token.
+- `git`; fix mode also requires the `gh` CLI. GitHub operations authenticate with the
+  configured role tokens.
+- The repository skills installed with the root `install.sh`. Fix mode also needs the
+  remediation skill's bundled Python environment created by that installer.
 - Access to Claude — by default a **Claude Platform on AWS** workspace and API key.
 
 ```bash
@@ -54,14 +61,32 @@ aws_region = "us-east-1"
 aws_api_key = "..."
 ```
 
-Then run:
+Then run a scan:
 
 ```bash
-python -m agent https://github.com/your-org/your-service
+python -m agent --mode=scan https://github.com/your-org/your-service
 
 # Scan only, no publish/issues:
-python -m agent https://github.com/your-org/your-service --no-publish --no-issues
+python -m agent --mode=scan https://github.com/your-org/your-service --no-publish --no-issues
 ```
+
+Run automated remediation from a local report directory:
+
+```bash
+python -m agent --mode=fix \
+  https://github.com/your-org/your-service \
+  /reports/YourService_VULNHUNT_RESULTS_opus48_2026-08-02
+
+# Exercise the complete local TDD/evidence/gate path with no GitHub mutation:
+python -m agent --mode=fix \
+  https://github.com/your-org/your-service \
+  /reports/YourService_VULNHUNT_RESULTS_opus48_2026-08-02 \
+  --no-post
+```
+
+The second positional may instead be a GitHub repository URL containing exactly one
+`*_VULNHUNT_RESULTS_*/README.md` tree. Remote reports use `reports_token`; target,
+fork, issue, and PR operations use `scan_token`.
 
 ## Configuration
 
@@ -101,6 +126,45 @@ default `anthropic_aws` mode.
 - `[scan]` — cloned-repo dir, allowed tools (`Bash` is stripped unless `--enable-bash`),
   `no_proxy`, autocompact threshold, stall timeout.
 - `[verify]` — scratch dir and a `repo_aliases` table for cross-repo hint resolution.
+- `[fix]` — scratch retention, private-fork owner/prefix, collaborators, repair/test
+  policy, report copy limits, and extra sandbox egress for repository package mirrors.
+
+### Automated fix-mode safety contract
+
+Selecting `--mode=fix` is an explicit code-execution authorization: unlike default
+scan mode, remediation necessarily runs exploit/security tests and repository test
+tooling through Bash. The runner constrains that authority as follows:
+
+- Execution starts in a fresh non-git scratch directory, so the skill can only select
+  its fork/headless workflow; the interactive in-place workflow is not automated.
+- The target URL must be a credential-free HTTPS `owner/repo` URL on `github.host`.
+- A report is copied into the run after rejecting symlinks, special files, excessive
+  file counts, and excessive byte counts. A remote results repository must identify
+  exactly one report rather than silently choosing “latest.”
+- Source and report content are declared untrusted. They cannot alter the runtime
+  configuration or the checkpoint/delivery policy.
+- Every phase checkpoint auto-advances only after its required artifacts validate.
+  The automated profile does not skip TDD, graph analysis, completeness, sweep, schema
+  validation, or any delivery gate.
+- Missing external values, public-interface decisions, cross-repository coordination,
+  and exhausted repair become explicit human-required outcomes; the model must not
+  guess.
+- Delivery is private-fork-only. For `--no-post`, Python pre-clones the target, then
+  removes GitHub credentials and default GitHub egress from the model session. The run
+  retains local branches and validation evidence without fork, push, issue, or PR
+  mutations.
+- The final `fix_disposition.json` is checked against
+  `fix_disposition.schema.json`, then checked again for target/report/policy identity,
+  unique finding/checkpoint IDs, complete successful checkpoints, and VERIFIED→gate
+  consistency.
+
+Fix mode uses an Opus model and rejects a non-Opus override before starting. Its GitHub
+token is session-scoped and made available to `gh` and an in-memory Git credential
+helper; it is never written into clone remotes or command arguments. Because the model
+must operate GitHub and execute target tests, run fix jobs in a dedicated ephemeral
+worker with a least-privilege token and narrowly configured `[fix].allowed_domains`.
+Fix mode also forces the Claude command sandbox on, fails when it is unavailable, and
+disallows unsandboxed command fallback regardless of the general `[sandbox]` defaults.
 
 ## Architecture
 
@@ -113,6 +177,10 @@ CLI (python -m agent)
   └─ runner.run_vulnhunt()
         └─ build_claude_settings()   env (auth + proxy + telemetry) + sandbox JSON
         └─ Claude Agent SDK          runs /vulnhunt, streams events, retries on 429
+  └─ fix.run_fix()
+        └─ contained report staging + runtime policy
+        └─ fix_runner                runs /vulnhunter-fix with Bash + task tools
+        └─ fix_disposition.json      schema + semantic validation
   └─ manifest.write_manifest()       scan_manifest.json (validated against schema)
   └─ publish.publish_results()       optional: push results to destination_repo
   └─ issues stage                    optional: extract → dedup → render → post issues
@@ -130,8 +198,10 @@ CLI (python -m agent)
   `OAuthTokenManager`, and `SigV4TokenManager` all expose `get_valid_token()`;
   `make_token_manager(config)` returns the right one, so the rest of the code is
   auth-mode agnostic.
-- **Contracts are schema-validated.** `scan_manifest.schema.json` (agent → scan-worker)
-  and `verify_disposition.schema.json` (verify output) are validated before write.
+- **Contracts are schema-validated.** `scan_manifest.schema.json` (agent → scan-worker),
+  `fix_disposition.schema.json` (automated remediation result), and
+  `verify_disposition.schema.json` (independent verification output) are validated at
+  their process boundaries.
 - **The `vulnhunter` package** is the thin CLI entry point around the `agent` package.
 
 ## Customizing via a base-agent / container pattern
