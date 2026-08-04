@@ -23,6 +23,7 @@ history. Maintainers can split them into numbered ADRs if they want an approval 
 | IADR-012 | Customize deployments through config/env and wrapper processes instead of source forks | Observed |
 | IADR-013 | Verify fixes through four independent static gates and defer exploit replay | Observed |
 | IADR-014 | Automate remediation only through an isolated fork profile with recorded checkpoints | Observed |
+| ADR-015 | Treat Mythos as a fail-closed execution profile, not a model alias | Accepted |
 
 ## IADR-001: Separate methodology skills from the headless runtime
 
@@ -292,3 +293,32 @@ the model. Prompt and Python tests must keep the automated profile synchronized.
 [`agent/fix_runner.py`](../../vulnhunter-agent/agent/fix_runner.py),
 [`fix_disposition.schema.json`](../../vulnhunter-agent/agent/schemas/fix_disposition.schema.json),
 and [`vulnhunter-fix/SKILL.md`](../../vulnhunter-fix/SKILL.md).
+
+## ADR-015: Treat Mythos as a fail-closed execution profile
+
+**Context.** `claude-mythos-5` is a limited-availability Claude Platform model with
+no safety classifiers, a one-million-token context window, and mandatory 30-day
+retention without ZDR. Allowing it through the existing `--model` string alone would
+leave target-controlled Claude settings, general process/container egress, and GitHub
+credentials in scope.
+
+**Decision.** Recognize only the canonical model ID and bind it to a mandatory policy:
+Claude Platform on AWS in `us-east-1`, explicit retention acknowledgement, telemetry
+off, strict SDK sandboxing, installed-user settings only, read-only/Bash-free scans,
+and no publish/issues in the model process. In GitHub Actions, run the model in a
+non-root `runsc` container with no host mounts on an internal Docker network. Route
+the only allowed outbound connection through a separate proxy whose ACL is the exact
+`aws-external-anthropic.us-east-1.api.aws:443` destination. Refuse to fall back when
+gVisor, sandboxing, or egress assertions fail.
+
+**Consequences.** Mythos scans need a dedicated self-hosted/ARC runner scale set and a
+trusted control-plane stage for clone/build/artifact handling. Publishing is a separate
+operation. The design costs more startup time and infrastructure than Opus on a hosted
+runner, but it mechanically removes GitHub tokens, host mounts, target settings, Bash,
+and general network reachability from the least-trusted model boundary. Retention and
+workspace entitlement remain external provider constraints.
+
+**Evidence.** [`agent/model_policy.py`](../../vulnhunter-agent/agent/model_policy.py),
+[`agent/build_settings.py`](../../vulnhunter-agent/agent/build_settings.py),
+[`scripts/run_mythos_sandbox.sh`](../../scripts/run_mythos_sandbox.sh), and
+[`mythos-security-profile.md`](mythos-security-profile.md).

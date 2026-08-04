@@ -23,6 +23,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from ._stream_events import SessionTotals, log_session_totals
 from .build_settings import build_claude_settings
 from .config import AgentConfig
+from .model_policy import permission_mode_for_model, setting_sources_for_model
 from .verify_runner import _dispatch_event, _event_summary
 
 logger = logging.getLogger(__name__)
@@ -315,15 +316,16 @@ async def run_fix_session(
         ],
         sandbox_allow_read_paths=[str(skill_dir)],
         strict_sandbox=True,
+        execution_mode="fix",
     )
     options = ClaudeAgentOptions(
         tools=list(_FIX_ALLOWED_TOOLS),
         allowed_tools=list(_FIX_ALLOWED_TOOLS),
-        permission_mode=config.scan.permission_mode,
+        permission_mode=permission_mode_for_model(model, config.scan.permission_mode),
         settings=settings_json,
         model=model,
         cwd=str(cwd),
-        setting_sources=["user", "project", "local"],
+        setting_sources=setting_sources_for_model(model),
         skills="all",
     )
 

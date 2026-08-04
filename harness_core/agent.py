@@ -6,7 +6,6 @@ import re
 import sys
 from dataclasses import dataclass, field
 from typing import Any
-import os
 
 from . import sandbox
 
@@ -117,16 +116,21 @@ async def run_agent(
     resume_session_id: str | None = None,
 ) -> AgentResult:
     """Run a Claude Code agent session via headless CLI inside ``container``"""
+    if model.strip().lower() == "claude-mythos-5":
+        raise RuntimeError(
+            "The legacy harness_core launcher is not an approved Mythos boundary. "
+            "Use scripts/run_mythos_sandbox.sh, which attests runsc and enforces "
+            "inference-only egress."
+        )
     # API Key / HTTPS_PROXY are on the container's env (set at docker_ops.run time)
     # CLAUDECODE="" stops the nested-session check
     # IS_SANDBOX=1 lets the CLI accept bypassPermissions
     cli_argv = ["docker", "exec", "-i",
-                "-e", "CLAUDECODE=", 
+                # Authentication is set once on the container by
+                # sandbox.agent_container(). Repeating secrets as docker-exec
+                # argv exposes them to host process listings.
+                "-e", "CLAUDECODE=",
                 "-e", "IS_SANDBOX=1",
-                "-e", f"ANTHROPIC_AWS_API_KEY={os.environ.get('ANTHROPIC_AWS_API_KEY', '')}",
-                "-e", f"CLAUDE_CODE_USE_ANTHROPIC_AWS={os.environ.get('CLAUDE_CODE_USE_ANTHROPIC_AWS', '')}",
-                "-e", f"ANTHROPIC_AWS_WORKSPACE_ID={os.environ.get('ANTHROPIC_AWS_WORKSPACE_ID', '')}",
-                "-e", f"AWS_REGION={os.environ.get('AWS_REGION', '')}",
                 "-w", "/work", "--",
                 container, "claude"]
     result = AgentResult()

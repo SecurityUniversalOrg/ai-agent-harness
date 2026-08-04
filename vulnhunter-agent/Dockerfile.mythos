@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+# The agent image is built before the untrusted model container starts. Runtime
+# egress is therefore not needed for package installation.
+ARG PYTHON_IMAGE=python:3.12.11-slim-bookworm
+FROM ${PYTHON_IMAGE}
+
+ARG APP_UID=65532
+ARG APP_GID=65532
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HOME=/home/appuser \
+    PATH=/home/appuser/.local/bin:${PATH}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bubblewrap ca-certificates git ripgrep socat tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid "${APP_GID}" appuser \
+    && useradd --uid "${APP_UID}" --gid "${APP_GID}" --create-home --shell /usr/sbin/nologin appuser
+
+WORKDIR /opt/vulnhunter-agent
+COPY vulnhunter-agent/ /opt/vulnhunter-agent/
+RUN python -m pip install --no-cache-dir /opt/vulnhunter-agent \
+    && mkdir -p /opt/claude/skills \
+    && rm -f /opt/vulnhunter-agent/agent/config.toml
+
+# Skills are immutable image content. At runtime the launcher copies them into
+# an ephemeral ~/.claude tmpfs before dropping back to APP_UID. Project/local
+# setting sources are also disabled by the Python Mythos policy.
+COPY vulnhunt/ /opt/claude/skills/vulnhunt/
+COPY vulnhunter-fix/ /opt/claude/skills/vulnhunter-fix/
+COPY vulnhunt-fix-verify/ /opt/claude/skills/vulnhunt-fix-verify/
+
+RUN chown -R root:root /opt/vulnhunter-agent /opt/claude \
+    && chmod -R a-w /opt/vulnhunter-agent /opt/claude \
+    && mkdir -p /workspace \
+    && chown "${APP_UID}:${APP_GID}" /workspace
+
+USER ${APP_UID}:${APP_GID}
+WORKDIR /workspace
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sleep", "infinity"]

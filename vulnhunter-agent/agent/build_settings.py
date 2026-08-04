@@ -12,16 +12,15 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from collections.abc import Mapping, Sequence
 from urllib.parse import urlparse
 
 from .config import AgentConfig
-
-# Match the 1-million-context variant of a Claude model. Used to pick a
-# higher autocompact threshold (more headroom) when the user opts into the
-# larger context window.
-_LONG_CONTEXT_RE = re.compile(r"\[1m\]|_1m\b", re.IGNORECASE)
+from .model_policy import (
+    enforce_mythos_base_policy,
+    is_long_context_model,
+    is_mythos_model,
+)
 
 # Deny system paths, restrict reads/writes to the cwd (cloned repo).
 # "." resolves to cwd inside Claude Code's sandbox.
@@ -42,7 +41,7 @@ def resolve_autocompact_pct(model: str, override: int | None) -> int:
     """
     if override is not None:
         return override
-    return 90 if _LONG_CONTEXT_RE.search(model or "") else 85
+    return 90 if is_long_context_model(model) else 85
 
 
 def _anthropic_host(cfg: AgentConfig) -> str:
@@ -147,18 +146,74 @@ def build_claude_settings(
     sandbox_allow_read_paths: Sequence[str] = (),
     sandbox_allow_write_paths: Sequence[str] = (),
     strict_sandbox: bool = False,
+    execution_mode: str = "scan",
 ) -> str:
     """Return a JSON string matching Claude Code's settings file schema."""
+    mythos = is_mythos_model(model)
+    if mythos:
+        # Defense in depth for programmatic callers that bypass the CLI's
+        # mode preflight. Mythos may never inherit a wider network allow-list
+        # or a GitHub credential through a mode-specific runner.
+        enforce_mythos_base_policy(cfg, model)
+        if sandbox_allowed_domains:
+            raise ValueError(
+                "claude-mythos-5 forbids additional sandbox domains; only the "
+                "Claude Platform inference endpoint is allowed"
+            )
+        sensitive_extra_env = {
+            key
+            for key, value in (extra_env or {}).items()
+            if value
+            and key.upper()
+            in {
+                "GH_TOKEN",
+                "GH_ENTERPRISE_TOKEN",
+                "GITHUB_TOKEN",
+                "VULNHUNT_GITHUB_SCAN_TOKEN",
+                "VULNHUNT_GITHUB_REPORTS_TOKEN",
+            }
+        }
+        if sensitive_extra_env:
+            raise ValueError(
+                "claude-mythos-5 forbids GitHub credentials in the model "
+                "process: " + ", ".join(sorted(sensitive_extra_env))
+            )
+        protected_extra_env = {
+            key
+            for key in (extra_env or {})
+            if key.upper()
+            in {
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_BEDROCK_BASE_URL",
+                "AWS_REGION",
+                "CLAUDE_CODE_ENABLE_TELEMETRY",
+                "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "NO_PROXY",
+                "NODE_TLS_REJECT_UNAUTHORIZED",
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+            }
+        }
+        if protected_extra_env:
+            raise ValueError(
+                "claude-mythos-5 forbids mode-specific overrides of protected "
+                "provider/network settings: "
+                + ", ".join(sorted(protected_extra_env))
+            )
+
     autocompact_pct = resolve_autocompact_pct(
         model, cfg.scan.autocompact_pct_override
     )
-    no_proxy = cfg.scan.no_proxy
+    no_proxy = "localhost,127.0.0.1" if mythos else cfg.scan.no_proxy
+    proxy = cfg.mythos.https_proxy if mythos else ""
     env: dict[str, str] = {
         "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": str(autocompact_pct),
-        "http_proxy": "",
-        "https_proxy": "",
-        "HTTP_PROXY": "",
-        "HTTPS_PROXY": "",
+        "http_proxy": proxy,
+        "https_proxy": proxy,
+        "HTTP_PROXY": proxy,
+        "HTTPS_PROXY": proxy,
         "no_proxy": no_proxy,
         "NO_PROXY": no_proxy,
         "NODE_TLS_REJECT_UNAUTHORIZED": "",
@@ -260,15 +315,56 @@ def build_claude_settings(
     if extra_env:
         env.update({str(key): str(value) for key, value in extra_env.items()})
 
-    return json.dumps(
-        {
-            "env": env,
-            "sandbox": _build_sandbox(
-                cfg,
-                extra_allowed_domains=sandbox_allowed_domains,
-                extra_allow_read_paths=sandbox_allow_read_paths,
-                extra_allow_write_paths=sandbox_allow_write_paths,
-                strict=strict_sandbox,
-            ),
+    settings: dict[str, object] = {
+        "env": env,
+        "sandbox": _build_sandbox(
+            cfg,
+            extra_allowed_domains=sandbox_allowed_domains,
+            extra_allow_read_paths=sandbox_allow_read_paths,
+            extra_allow_write_paths=sandbox_allow_write_paths,
+            strict=True if mythos else strict_sandbox,
+        ),
+    }
+    if mythos:
+        # Claude's documented permission rules apply to native Read/Edit/Glob/Grep
+        # tools as well as the Bash sandbox. In particular, deny /proc so a model
+        # cannot use Read to recover the workspace API key from process environ.
+        # ``Edit`` covers all built-in mutation tools, including Write.
+        sensitive_roots = (
+            "app",
+            "etc",
+            "opt",
+            "proc",
+            "root",
+            "run",
+            "sys",
+            "tmp",
+            "var",
+        )
+        deny = [
+            *(f"Read(//{root}/**)" for root in sensitive_roots),
+            *(f"Edit(//{root}/**)" for root in sensitive_roots),
+            "Read(/.claude/**)",
+            "Read(/CLAUDE.md)",
+            "Read(**/.claude/**)",
+            "Read(**/CLAUDE.md)",
+            "Edit(/.claude/**)",
+            "Edit(/.git/**)",
+            "Edit(/CLAUDE.md)",
+            "Edit(**/.claude/**)",
+            "Edit(**/CLAUDE.md)",
+            "Bash",
+            "WebFetch",
+            "WebSearch",
+            "NotebookEdit",
+        ]
+        settings["permissions"] = {
+            "deny": [
+                rule
+                for rule in deny
+                if rule != "Bash" or execution_mode != "fix"
+            ],
+            "disableBypassPermissionsMode": "disable",
+            "disableAutoMode": "disable",
         }
-    )
+    return json.dumps(settings)

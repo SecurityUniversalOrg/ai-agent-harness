@@ -24,6 +24,8 @@ file to refresh the installed copy.
 
 > **Run on Opus.** Independent verification requires the same reasoning class as
 > the scan it checks. You supply your own model access.
+> The headless agent can use Mythos 5 only with its hardened profile plus
+> `--no-post --no-reopen`; direct interactive use remains Opus-only.
 
 ## Tool envelope (why it's safe)
 

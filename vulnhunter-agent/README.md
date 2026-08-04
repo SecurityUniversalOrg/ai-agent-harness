@@ -70,6 +70,12 @@ python -m agent --mode=scan https://github.com/your-org/your-service
 python -m agent --mode=scan https://github.com/your-org/your-service --no-publish --no-issues
 ```
 
+Reviewed execution models are `claude-opus-4-7`, `claude-opus-4-8`, and
+`claude-mythos-5`. Mythos is intentionally not a local drop-in override: it has no
+safety classifiers and mandatory 30-day retention without ZDR. Use the hardened
+GitHub Actions profile or `scripts/run_mythos_sandbox.sh`; see
+[Mythos 5 security and deployment](../docs/architecture/mythos-security-profile.md).
+
 Run automated remediation from a local report directory:
 
 ```bash
@@ -105,13 +111,19 @@ Settings load from a TOML file (`--config`, then `$VULNHUNT_AGENT_CONFIG`, then
 
 `anthropic_aws` passes `CLAUDE_CODE_USE_ANTHROPIC_AWS=1`,
 `ANTHROPIC_AWS_WORKSPACE_ID`, `AWS_REGION`, and `ANTHROPIC_AWS_API_KEY` to the
-bundled Claude Code process. `bedrock_oauth` exists for environments that front Claude with a Bedrock proxy and mint
 bundled Claude Code process. `bedrock_oauth` exists for environments that front Claude
 with a Bedrock proxy and mint short-lived bearer tokens. `bedrock_sigv4` is for AWS-native
 setups that call Bedrock directly (use a cross-region inference-profile model ID, e.g.
 `us.anthropic.claude-...`); credentials resolve from the usual AWS chain — env vars,
 shared config/credentials file, SSO, or an instance/task role. Most users want the
 default `anthropic_aws` mode.
+
+For Mythos, use the canonical Claude Platform model ID `claude-mythos-5` and
+`aws_region = "us-east-1"`. Its endpoint is
+`aws-external-anthropic.us-east-1.api.aws:443` (hyphens in `us-east-1`). The
+`[mythos]` block requires retention acknowledgement, the hardened runtime, and the
+launcher-provided inference-only proxy. Mythos also forces telemetry off, strict
+sandboxing, and installed-user-only Claude settings.
 
 ### Other sections (abridged)
 
@@ -121,6 +133,8 @@ default `anthropic_aws` mode.
 - `[publish]` — `destination_repo` + `branch` for pushing results.
 - `[issues]` — labels, dedup, clean-scan receipts, extraction/dedup models.
 - `[sandbox]` — OS-level filesystem/network sandbox for the CLI's tools.
+- `[mythos]` — mandatory retention acknowledgement, gVisor runtime requirement, and
+  inference-only proxy for `claude-mythos-5`.
 - `[telemetry]` — optional OTLP export; `otel_exporter_otlp_endpoint` +
   `resource_attributes` (neutral default; set your own owner/org tags).
 - `[scan]` — cloned-repo dir, allowed tools (`Bash` is stripped unless `--enable-bash`),
@@ -158,8 +172,10 @@ tooling through Bash. The runner constrains that authority as follows:
   unique finding/checkpoint IDs, complete successful checkpoints, and VERIFIED→gate
   consistency.
 
-Fix mode uses an Opus model and rejects a non-Opus override before starting. Its GitHub
-token is session-scoped and made available to `gh` and an in-memory Git credential
+Fix mode accepts only the explicitly reviewed Opus 4.7, Opus 4.8, and Mythos 5 model
+IDs. Mythos additionally requires `--no-post`, the hardened runtime marker, and no
+extra domains; verify requires both `--no-post` and `--no-reopen`. The ordinary Opus
+delivery profile's GitHub token is session-scoped and made available to `gh` and an in-memory Git credential
 helper; it is never written into clone remotes or command arguments. Because the model
 must operate GitHub and execute target tests, run fix jobs in a dedicated ephemeral
 worker with a least-privilege token and narrowly configured `[fix].allowed_domains`.
@@ -194,6 +210,10 @@ CLI (python -m agent)
   (bedrock_sigv4 mode — omitting `CLAUDE_CODE_SKIP_BEDROCK_AUTH` /
   `ANTHROPIC_AUTH_TOKEN` is what makes the bundled CLI sign requests itself). Both the
   scan loop and the issues-LLM calls go through it.
+- **Mythos policy is a separate chokepoint.** `model_policy.py` validates retention,
+  region/auth, runtime attestation, mode flags, tool authority, and settings sources.
+  `build_claude_settings` repeats the sensitive checks so a programmatic caller cannot
+  add GitHub credentials or extra egress after CLI preflight.
 - **Token providers share one interface.** `AnthropicAwsApiKeyTokenManager`,
   `OAuthTokenManager`, and `SigV4TokenManager` all expose `get_valid_token()`;
   `make_token_manager(config)` returns the right one, so the rest of the code is

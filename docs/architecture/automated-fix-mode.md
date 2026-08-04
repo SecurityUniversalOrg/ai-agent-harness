@@ -75,7 +75,7 @@ flowchart LR
 
 | Component | Responsibility | Explicitly does not own |
 |---|---|---|
-| CLI | Mode arity, cross-mode flag rejection, Opus enforcement, standalone token preflight | Finding interpretation or patch generation |
+| CLI | Mode arity, cross-mode flag rejection, explicit reviewed-model enforcement, Mythos no-post policy, standalone token preflight | Finding interpretation or patch generation |
 | `fix.py` | URL validation, scratch containment, report staging, runtime policy, outcome mapping | GitHub remediation commands or TDD decisions |
 | `fix_runner.py` | Locked SDK tools, credentials, sandbox extensions, kickoff contract, event log, schema classification | Phase semantics or result synthesis |
 | Skill automated profile | Complete parse/plan/implement/verify/sweep/deliver methodology and terminal finding triage | Choosing interactive-only policy decisions |
@@ -97,7 +97,7 @@ sequenceDiagram
     participant Contract as Disposition validator
 
     Caller->>CLI: mode fix, target URL, results input
-    CLI->>CLI: validate two positionals and Opus model
+    CLI->>CLI: validate two positionals and reviewed model policy
     CLI->>CLI: preflight scan identity
     CLI->>Stage: run_fix
     Stage->>Stage: validate host and owner/repo URL
@@ -255,7 +255,7 @@ For each finding, the automated profile retains the source skill's evidence orde
 | 2 | Invalid target/results argument shape |
 | 3 | Required GitHub scan identity missing |
 | 5 | Valid `PARTIAL` disposition; useful work exists but the run is not complete |
-| 64 | Top-level CLI/config usage error, including non-Opus fix model |
+| 64 | Top-level CLI/config usage error, including a model outside Opus 4.7, Opus 4.8, and Mythos 5 |
 | 130 | Caller interruption |
 
 ## 10. Security and trust boundaries
@@ -285,6 +285,10 @@ privilege:
   Python stages the target first, then the strictly sandboxed model receives blank
   GitHub token variables, a disabled Git credential helper, and no default GitHub
   sandbox domains.
+
+Mythos 5 is accepted only on this no-post path and only after the shared hardened
+runtime, retention, strict-sandbox, telemetry-off, and inference-only proxy checks.
+Delivery-enabled automated remediation remains an Opus profile.
 
 Residual risk remains: a model with Bash and a GitHub token can technically read its
 environment, and repository tests execute untrusted code. Deploy fix mode in an

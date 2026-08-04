@@ -365,6 +365,49 @@ flowchart LR
 All except Gate 5 must produce at least one invocation. A missing required input or an
 empty required route fails closed.
 
+## Mythos GitHub Actions runtime
+
+```mermaid
+sequenceDiagram
+    participant W as Workflow
+    participant C as Trusted control plane
+    participant G as GitHub
+    participant D as Docker and runsc
+    participant X as Credential-free canary
+    participant A as Mythos agent
+    participant P as Egress proxy
+    participant AWS as Claude Platform AWS
+
+    W->>C: Select claude-mythos-5 and acknowledge retention
+    C->>D: Build and launch disposable agent and proxy with runsc
+    D-->>C: Attest users namespaces mounts capabilities and read-only roots
+    C->>X: Attempt protected writes tmpfs execution and direct HTTP and HTTPS
+    X-->>C: Deny protected writes execution and direct egress
+    C->>P: Probe HTTP CONNECT IP port and hostname policy
+    P-->>C: Deny example.com IP and wrong port; allow exact AWS host on 443
+    C->>D: Destroy credential-free canary environment
+    C->>G: Clone target with scan token
+    C->>C: Build immutable agent and proxy images
+    C->>D: Create internal network and runsc container
+    D-->>C: Attest runtime network and read-only root
+    C->>A: Copy credential-free checkout into tmpfs
+    C->>A: Supply AWS workspace credential only
+    A->>P: Test denied and allowed CONNECT destinations
+    P-->>A: Deny all except exact AWS endpoint on 443
+    A->>P: Send inference TLS traffic
+    P->>AWS: CONNECT exact regional endpoint
+    AWS-->>A: Stream model response through proxy
+    A-->>C: Persist scan report in ephemeral workspace
+    C-->>W: Copy report out and destroy containers and network
+```
+
+The preflight emits sanitized `ISOLATION_PROOF` records to the job log and GitHub step
+summary. It receives no AWS or GitHub credentials. The model container never receives
+either GitHub token. The scan reuses the checkout staged under its configured clone
+directory, loads only installed user settings, and runs with `--no-publish --no-issues`. See the
+[Mythos security profile](mythos-security-profile.md) for the complete control and
+failure matrix.
+
 ## Process outcomes
 
 ### Scan-mode exit codes observed in the CLI
@@ -402,5 +445,5 @@ process context rather than infer a complete state machine from the integer alon
 | 2 | Invalid target/results shape in the fix orchestrator |
 | 3 | Required GitHub scan identity missing |
 | 5 | Valid `PARTIAL` disposition with useful but incomplete work |
-| 64 | Top-level CLI/config usage error, including a non-Opus fix model |
+| 64 | Top-level CLI/config usage error, including a fix model outside the explicit Opus 4.7, Opus 4.8, and Mythos 5 remediation set |
 | 130 | Operator interruption handled by the outer CLI |

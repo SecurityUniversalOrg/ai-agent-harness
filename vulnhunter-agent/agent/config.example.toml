@@ -18,6 +18,8 @@
 #     VULNHUNT_FIX_ALLOWED_DOMAINS (comma-separated)
 #     VULNHUNT_SANDBOX_ENABLED       (true/false)
 #     VULNHUNT_SCAN_ALLOWED_TOOLS    (comma-separated)
+#     VULNHUNT_MYTHOS_DATA_RETENTION_ACKNOWLEDGED (true/false)
+#     VULNHUNT_MYTHOS_HTTPS_PROXY
 
 [anthropic]
 # How the agent authenticates to Claude:
@@ -43,7 +45,8 @@
 #                     widen the sandbox network allow-list or disable the
 #                     sandbox for those.
 auth_mode = "anthropic_aws"
-# Default model. Override per-invocation with --model.
+# Default model. Reviewed remediation choices are claude-opus-4-7,
+# claude-opus-4-8, and claude-mythos-5. Override per invocation with --model.
 model = "claude-opus-4-8"
 
 # --- anthropic_aws mode ---
@@ -86,6 +89,17 @@ enabled = false
 fail_if_unavailable = true
 allow_unsandboxed_commands = false
 
+[mythos]
+# Mythos 5 is a limited-availability model without safety classifiers. It also
+# has mandatory 30-day request retention and is not eligible for ZDR. Selecting
+# claude-mythos-5 fails closed unless this acknowledgement is true.
+data_retention_acknowledged = false
+# The gVisor runtime requirement is unconditional and cannot be disabled in TOML.
+# The hardened launcher supplies its attestation marker only after Docker checks.
+# Set by scripts/run_mythos_sandbox.sh to its isolated Squid proxy. The proxy
+# accepts CONNECT only to aws-external-anthropic.us-east-1.api.aws:443.
+https_proxy = ""
+
 [telemetry]
 # Send Claude Code OTLP metrics/logs. Off by default for the CLI.
 enabled = false
@@ -112,8 +126,8 @@ clone_timeout_seconds = 300
 allowed_tools = ["Agent", "Glob", "Read", "Write"]
 permission_mode = "acceptEdits"
 # Trigger context compaction at this percentage of the model's window.
-# Defaults derive from the model: 90 for 1M-context variants, 85 for
-# standard 200K-context. Uncomment to override.
+# Defaults derive from the model: 90 for 1M-context variants (including
+# claude-mythos-5), 85 for standard 200K-context. Uncomment to override.
 # autocompact_pct_override = 70
 # Cap how long a subagent (Task tool) can stall without forward progress
 # before the CLI returns "Request timed out". Set 0 to use the CLI default.

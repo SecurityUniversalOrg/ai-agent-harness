@@ -27,7 +27,10 @@ or offer the mode menu yet):
 Wait for the user. Only proceed past this step once they are on Opus, or if they
 explicitly reply that they want to continue on the current model anyway.
 
-Skip this check under path **A** (agent-driven); the agent controls the model.
+Skip this check under path **A** (agent-driven); the agent controls the model. The
+agent may select `claude-mythos-5` only through its retention-acknowledged, strict
+sandbox/gVisor, inference-only execution profile. Do not infer that direct interactive
+Mythos use has the same containment.
 
 Bind `VULNHUNT_DIR` (results dir), `VULNHUNT_BRANCH` (`<branch> [<short-sha>]` or
 `unknown`), and `Repository URL` (normalized origin URL, else dir basename), then do

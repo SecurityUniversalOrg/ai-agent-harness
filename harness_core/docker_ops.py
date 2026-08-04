@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import tempfile
 
 
 def build(dockerfile_dir: str, tag: str) -> str:
@@ -31,23 +32,50 @@ def run(
         extra += ["--runtime", runtime]
     if shm_size:
         extra += ["--shm-size", shm_size]
-    for k, v in (env or {}).items():
-        extra += ["-e", f"{k}={v}"]
+    env_file: str | None = None
+    if env:
+        fd, env_file = tempfile.mkstemp(prefix="vulnhunt-docker-env-")
+        try:
+            os.chmod(env_file, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                for key, value in env.items():
+                    if "\n" in key or "\r" in key or "=" in key:
+                        raise ValueError(f"invalid container environment key: {key!r}")
+                    if "\n" in value or "\r" in value:
+                        raise ValueError(
+                            f"container environment value for {key!r} contains a newline"
+                        )
+                    fh.write(f"{key}={value}\n")
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            os.unlink(env_file)
+            raise
+        extra += ["--env-file", env_file]
     for src, dst in (mounts or []):
         extra += ["-v", f"{src}:{dst}:ro"]
-    r = subprocess.run(
-        [
-            "docker", "run", "-dit",
-            *extra,
-            "--name", name,
-            "--network", network,
-            "--memory", memory,
-            image_tag, shell,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        r = subprocess.run(
+            [
+                "docker", "run", "-dit",
+                *extra,
+                "--name", name,
+                "--network", network,
+                "--memory", memory,
+                image_tag, shell,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        if env_file:
+            try:
+                os.unlink(env_file)
+            except FileNotFoundError:
+                pass
     if r.returncode != 0:
         raise RuntimeError(
             f"docker run failed (exit {r.returncode}): {r.stderr.strip()}"

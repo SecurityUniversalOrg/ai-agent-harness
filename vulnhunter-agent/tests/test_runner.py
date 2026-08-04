@@ -61,6 +61,7 @@ class TestModelTag:
             ("claude-4.6-opus[1M]", "opus46_1m"),
             ("claude-sonnet-5", "sonnet5"),
             ("claude-haiku-4-5", "haiku45"),
+            ("claude-mythos-5", "mythos5_1m"),
             ("claude-3-5-sonnet-20240620", "sonnet35"),
             ("gpt-4o", "gpt4"),
         ],

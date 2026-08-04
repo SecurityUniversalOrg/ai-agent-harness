@@ -24,6 +24,8 @@ file to refresh the installed copy.
 
 > **Run on Opus.** The falsification discipline that keeps false positives low
 > depends on frontier Opus-class reasoning. You supply your own model access.
+> Headless `claude-mythos-5` is also supported only through the agent's hardened
+> gVisor/inference-only profile; this is not approval for direct interactive use.
 
 ## Usage
 

@@ -146,10 +146,12 @@ Check your own model identity from your session system prompt (it says "You are 
 | You are | Action |
 |---------|--------|
 | Opus 4.x (any variant) | Proceed to Step 1. |
+| Mythos 5 | **Stop for direct interactive use.** Tell the user to use the vulnhunter-agent hardened Mythos profile; it requires retention acknowledgement, gVisor, strict sandboxing, no extra egress, and `--no-post`. |
 | Sonnet 4.x | **Stop.** Tell the user, verbatim: `This skill is calibrated for Opus. Please run `/model claude-opus-4-8` and then re-invoke `/vulnhunter-fix`.` Do not run any other tool calls. |
 | Haiku 4.x | **Stop.** Same message as above. |
 
-This is interactive-mode only. Headless mode invokes the executor with a fixed Opus model under the hood and skips this gate.
+This is interactive-mode only. Headless mode invokes an explicitly reviewed model
+(Opus 4.7, Opus 4.8, or the hardened Mythos 5 `--no-post` profile) and skips this gate.
 
 The check applies even if the user has *just* switched models mid-session — you may have started this turn on Sonnet because that was the session default before they ran `/vulnhunter-fix`. The `/model` command takes effect on the *next* turn, so stopping here gives the user the clean handoff.
 

@@ -17,7 +17,17 @@ inputs:
 
   reports-token:
     description: GitHub token used to read and publish VulnHunter reports
-    required: true
+    required: false
+
+  model:
+    description: Reviewed model ID (claude-opus-4-7, claude-opus-4-8, or claude-mythos-5)
+    required: false
+    default: claude-opus-4-8
+
+  mythos-retention-acknowledged:
+    description: Explicit acknowledgement that Mythos requests have mandatory 30-day retention
+    required: false
+    default: "false"
 
   repository-url:
     description: GitHub repository URL to scan
@@ -38,6 +48,7 @@ runs:
 
   steps:
     - name: Set up Python
+      if: inputs.model != 'claude-mythos-5'
       uses: actions/setup-python@v6
       with:
         python-version: ${{ inputs.python-version }}
@@ -50,6 +61,8 @@ runs:
         SCAN_TOKEN: ${{ inputs.scan-token }}
         REPORTS_TOKEN: ${{ inputs.reports-token }}
         TARGET_REPOSITORY: ${{ inputs.repository-url }}
+        MODEL: ${{ inputs.model }}
+        MYTHOS_RETENTION_ACKNOWLEDGED: ${{ inputs.mythos-retention-acknowledged }}
       run: |
         set -euo pipefail
 
@@ -57,13 +70,16 @@ runs:
           [aws-workspace-id]="${AWS_WORKSPACE_ID}"
           [aws-api-key]="${AWS_API_KEY}"
           [scan-token]="${SCAN_TOKEN}"
-          [reports-token]="${REPORTS_TOKEN}"
         )
 
         for input_name in "${!required_values[@]}"; do
           value="${required_values[$input_name]}"
           if [[ -z "${value}" ]]; then
             echo "::error::The ${input_name} input is required."
+            exit 1
+          fi
+          if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+            echo "::error::The ${input_name} input must be a single line."
             exit 1
           fi
           echo "::add-mask::${value}"
@@ -74,8 +90,33 @@ runs:
           exit 1
         fi
 
+        case "${MODEL}" in
+          claude-opus-4-7|claude-opus-4-8|claude-mythos-5) ;;
+          *)
+            echo "::error::Unsupported model '${MODEL}'. Use claude-opus-4-7, claude-opus-4-8, or claude-mythos-5."
+            exit 1
+            ;;
+        esac
 
-    - name: Run Claude Platform on AWS agent scan
+        if [[ "${MODEL}" == "claude-mythos-5" ]]; then
+          if [[ "${MYTHOS_RETENTION_ACKNOWLEDGED}" != "true" ]]; then
+            echo "::error::Mythos requires mythos-retention-acknowledged=true (mandatory 30-day retention; no ZDR)."
+            exit 1
+          fi
+        elif [[ -z "${REPORTS_TOKEN}" ]]; then
+          echo "::error::The reports-token input is required for the Opus execution profile."
+          exit 1
+        else
+          if [[ "${REPORTS_TOKEN}" == *$'\n'* || "${REPORTS_TOKEN}" == *$'\r'* ]]; then
+            echo "::error::The reports-token input must be a single line."
+            exit 1
+          fi
+          echo "::add-mask::${REPORTS_TOKEN}"
+        fi
+
+
+    - name: Run Opus Claude Platform on AWS agent scan
+      if: inputs.model != 'claude-mythos-5'
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
@@ -84,6 +125,7 @@ runs:
         VULNHUNT_ANTHROPIC_AUTH_MODE: anthropic_aws
         VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
         VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
+        VULNHUNT_ANTHROPIC_MODEL: ${{ inputs.model }}
         VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.scan-token }}
         VULNHUNT_GITHUB_REPORTS_TOKEN: ${{ inputs.reports-token }}
         TARGET_REPOSITORY: ${{ inputs.repository-url }}
@@ -92,6 +134,9 @@ runs:
         set -euo pipefail
 
         echo "Setting up Environment via .venv"
+        cp agent/config.example.toml agent/config.toml
+
+        python3 -m venv .venv
         source .venv/bin/activate
 
         python3 -m pip install -e ".[dev]"
@@ -99,5 +144,48 @@ runs:
         echo "Scanning repository: ${TARGET_REPOSITORY}"
         python3 -m agent \
           --mode=scan \
+          --model "${VULNHUNT_ANTHROPIC_MODEL}" \
           --config agent/config.toml \
           "${TARGET_REPOSITORY}"
+
+    - name: Validate and attest Mythos gVisor isolation
+      if: inputs.model == 'claude-mythos-5'
+      shell: bash
+      env:
+        # This credential-free canary prints selected, non-secret attestations
+        # and proves filesystem/network denial before any model is started.
+        MYTHOS_REPO_ROOT: ${{ github.workspace }}
+        MYTHOS_DOCKER_RUNTIME: runsc
+      run: |
+        set -euo pipefail
+        chmod +x "${GITHUB_ACTION_PATH}/../../../scripts/validate_mythos_isolation.sh"
+        proof_log="${RUNNER_TEMP}/mythos-isolation-proof-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+        "${GITHUB_ACTION_PATH}/../../../scripts/validate_mythos_isolation.sh" | tee "${proof_log}"
+
+        {
+          echo "### Mythos gVisor isolation proof"
+          echo
+          echo '```text'
+          grep '^ISOLATION_PROOF ' "${proof_log}"
+          echo '```'
+        } >> "${GITHUB_STEP_SUMMARY}"
+        rm -f -- "${proof_log}"
+
+    - name: Run isolated Mythos scan with gVisor
+      if: inputs.model == 'claude-mythos-5'
+      shell: bash
+      env:
+        TARGET_REPOSITORY: ${{ inputs.repository-url }}
+        VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
+        VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
+        # This token exists only in the trusted control-plane process. The
+        # launcher never writes it to the agent env-file or model container.
+        VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.scan-token }}
+        MYTHOS_RETENTION_ACKNOWLEDGED: ${{ inputs.mythos-retention-acknowledged }}
+        MYTHOS_REPO_ROOT: ${{ github.workspace }}
+        MYTHOS_OUTPUT_DIR: ${{ github.workspace }}/${{ inputs.working-directory }}/clones
+        MYTHOS_DOCKER_RUNTIME: runsc
+      run: |
+        set -euo pipefail
+        chmod +x "${GITHUB_ACTION_PATH}/../../../scripts/run_mythos_sandbox.sh"
+        "${GITHUB_ACTION_PATH}/../../../scripts/run_mythos_sandbox.sh"

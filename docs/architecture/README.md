@@ -28,6 +28,7 @@ one notation:
 Related documents:
 
 - [Runtime views](runtime-views.md)
+- [Mythos 5 security and deployment profile](mythos-security-profile.md)
 - [Automated fix-mode architecture](automated-fix-mode.md)
 - [Architecture decisions](decisions.md)
 - [Quality attributes, threats, and risks](quality-and-risks.md)
@@ -131,8 +132,10 @@ flowchart LR
 - Fix verification is also implemented as a prompt-only skill. It has no Bash or
   network tools and does not replay exploit tests; phase 3 is explicitly reserved for
   that future capability.
-- Audit execution expects an Opus-class model; the headless runtime controls the
-  configured model, while interactive skills enforce or request an operator choice.
+- Interactive audit execution expects an Opus-class model. The headless runtime also
+  supports the exact `claude-mythos-5` model ID, but only through the fail-closed
+  [Mythos profile](mythos-security-profile.md) because Mythos has no safety classifiers
+  and mandatory 30-day request retention.
 - The agent requires Python 3.12+, `git`, the Claude Agent SDK, and installed user
   skills. The remediation helper package requires Python 3.11+ and `git`/`gh`.
 - Scan mode accepts one repository per process. Fix mode accepts one target plus one
@@ -458,6 +461,7 @@ flowchart TB
 | Interactive | Operator invokes `/vulnhunt` or `/vulnhunter-fix` from Claude Code; skills enforce model/mode/phase choices |
 | Standalone agent | TOML and/or environment variables provide credentials and policy; process returns documented scan, fix, or verify outcomes |
 | Derived container | Base image contains Python package, Claude runtime, and installed skills; derived image adds environment-specific config, CA, and telemetry |
+| Mythos GitHub Actions | Trusted control plane stages a credential-free checkout; an unprivileged gVisor container runs read-only with inference-only proxy egress; publishing remains outside the model boundary |
 | Brokered worker | Parent process refreshes role tokens as atomic JSON files; the agent resolves each token at use/request time |
 
 Recommended production boundary: one target repository per ephemeral worker with an
@@ -517,6 +521,7 @@ Use these files as the fastest path from an architecture question to code:
 | CLI modes, exit mapping, stage orchestration | [`agent/__main__.py`](../../vulnhunter-agent/agent/__main__.py) |
 | Configuration validation | [`agent/config.py`](../../vulnhunter-agent/agent/config.py) and [`config.example.toml`](../../vulnhunter-agent/agent/config.example.toml) |
 | Inference authentication and sandbox | [`agent/auth.py`](../../vulnhunter-agent/agent/auth.py), [`agent/build_settings.py`](../../vulnhunter-agent/agent/build_settings.py) |
+| Mythos model and mode policy | [`agent/model_policy.py`](../../vulnhunter-agent/agent/model_policy.py), [`scripts/run_mythos_sandbox.sh`](../../scripts/run_mythos_sandbox.sh) |
 | Scan SDK session and continuation handling | [`agent/runner.py`](../../vulnhunter-agent/agent/runner.py) |
 | Automated fix containment and orchestration | [`agent/fix.py`](../../vulnhunter-agent/agent/fix.py), [`agent/fix_runner.py`](../../vulnhunter-agent/agent/fix_runner.py), [`fix_disposition.schema.json`](../../vulnhunter-agent/agent/schemas/fix_disposition.schema.json) |
 | Report publication | [`agent/publish.py`](../../vulnhunter-agent/agent/publish.py) |

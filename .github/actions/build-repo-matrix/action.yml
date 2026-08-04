@@ -38,9 +38,6 @@ runs:
             "repo",
             "default_branch",
             "internet_facing",
-            "cloud_platform",
-            "business_owner",
-            "development_exec",
         ]
 
         rows = []

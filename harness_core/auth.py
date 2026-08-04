@@ -30,10 +30,24 @@ _WIF_VARS = (
 def resolve_auth_env() -> dict[str, str] | None:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if api_key:
-        return {"ANTHROPIC_API_KEY", api_key}
+        return {"ANTHROPIC_API_KEY": api_key}
     aws_api_key = os.environ.get("ANTHROPIC_AWS_API_KEY")
     if aws_api_key:
-        return {"ANTHROPIC_AWS_API_KEY"}
+        workspace_id = os.environ.get("ANTHROPIC_AWS_WORKSPACE_ID", "")
+        aws_region = os.environ.get("AWS_REGION", "")
+        if not workspace_id or not aws_region:
+            print(
+                "warning: ANTHROPIC_AWS_API_KEY is set but "
+                "ANTHROPIC_AWS_WORKSPACE_ID or AWS_REGION is missing.",
+                file=sys.stderr,
+            )
+            return None
+        return {
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS": "1",
+            "ANTHROPIC_AWS_API_KEY": aws_api_key,
+            "ANTHROPIC_AWS_WORKSPACE_ID": workspace_id,
+            "AWS_REGION": aws_region,
+        }
     oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     if oauth_token:
         return {"CLAUDE_CODE_OAUTH_TOKEN": oauth_token}

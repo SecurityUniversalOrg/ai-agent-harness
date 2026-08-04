@@ -82,6 +82,11 @@ from ._stream_events import SessionTotals
 from .issues import PostSummary
 from .issues_extract import Finding
 from .manifest import write_manifest
+from .model_policy import (
+    SUPPORTED_REMEDIATION_MODELS,
+    enforce_mythos_mode_policy,
+    is_supported_remediation_model,
+)
 from .token_client import GitHubRole, get_github_token
 
 
@@ -816,6 +821,21 @@ async def _run_scan_flow(
     _validate_modes(scan=scan, publish=publish, issues=issues, config=config)
     logging.info("Stages: scan=%s publish=%s issues=%s", scan, publish, issues)
 
+    # Apply the model-specific profile before token preflight, repository
+    # property lookup, or clone. This also covers --model overrides, which are
+    # intentionally resolved after config loading.
+    effective_read_only = True if args.read_only is None else args.read_only
+    model = args.model or config.anthropic.model
+    enforce_mythos_mode_policy(
+        config,
+        model,
+        mode="scan",
+        read_only=effective_read_only,
+        enable_bash=args.enable_bash,
+        publish=publish,
+        issues=issues,
+    )
+
     # Standalone-mode preflight (TOKEN-CLIENT-005). Verifies each token
     # actually needed by the enabled stages can authenticate against
     # GitHub *before* we clone anything. Skipped in broker mode — the
@@ -859,7 +879,6 @@ async def _run_scan_flow(
     # bypass main() (none exist today, but the invariant is small and
     # the failure mode if it ever happened — silently scanning with
     # Bash enabled — is bad enough to justify the belt-and-suspenders).
-    effective_read_only = True if args.read_only is None else args.read_only
     if scan and args.enable_bash and effective_read_only:
         raise RuntimeError(
             "Internal invariant violated: enable_bash=True with "
@@ -1122,6 +1141,15 @@ async def _amain_verify(args: argparse.Namespace) -> int:
             ),
         )
 
+    model = args.model or config.anthropic.model
+    enforce_mythos_mode_policy(
+        config,
+        model,
+        mode="verify",
+        no_post=args.no_post,
+        no_reopen=args.no_reopen,
+    )
+
     # Apply verify-specific overrides to the config in place — verify.run_verify
     # only consumes ``config.verify.*`` and the CLI is the user's intent here.
     scratch_dir = Path(args.scratch_dir).expanduser().resolve() if args.scratch_dir else None
@@ -1179,12 +1207,18 @@ async def _amain_fix(args: argparse.Namespace) -> int:
         )
 
     model = args.model or config.anthropic.model
-    if "opus" not in model.lower():
+    if not is_supported_remediation_model(model):
         raise ValueError(
-            "--mode=fix requires an Opus model because the remediation skill's "
-            "planning, patch synthesis, and bounded repair workflow are calibrated "
-            f"for Opus; got {model!r}."
+            "--mode=fix requires an explicitly reviewed remediation model; "
+            f"supported models are {', '.join(sorted(SUPPORTED_REMEDIATION_MODELS))}; "
+            f"got {model!r}."
         )
+    enforce_mythos_mode_policy(
+        config,
+        model,
+        mode="fix",
+        no_post=args.no_post,
+    )
 
     # Fix always needs the scan identity, including --no-post: it clones the target
     # and performs read-only repo/access checks.  Standalone mode validates the token

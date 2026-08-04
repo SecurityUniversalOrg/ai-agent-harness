@@ -24,6 +24,8 @@ installed copy.
 > **Run on Opus.** The reasoning load (clustering, fix synthesis, the collaboration
 > loop) is calibrated for Opus; the skill stops and asks you to switch if it detects
 > Sonnet or Haiku.
+> The headless agent also recognizes Mythos 5 only in its hardened `--no-post`
+> profile. Direct interactive Mythos use is rejected.
 
 ## Requirements
 

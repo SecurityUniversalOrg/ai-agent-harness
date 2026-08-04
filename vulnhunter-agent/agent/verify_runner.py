@@ -51,6 +51,7 @@ from jsonschema import Draft202012Validator
 
 from .build_settings import build_claude_settings
 from .config import AgentConfig
+from .model_policy import permission_mode_for_model, setting_sources_for_model
 from ._stream_events import (
     SessionTotals,
     _agent_name_from_started,
@@ -261,7 +262,11 @@ async def run_verify_session(
     scan_id = out_dir.parent.name  # one level up from out/iter-N — readable run id
 
     settings_json = build_claude_settings(
-        config, auth_token, model=model, scan_id=scan_id
+        config,
+        auth_token,
+        model=model,
+        scan_id=scan_id,
+        execution_mode="verify",
     )
     options = ClaudeAgentOptions(
         # Locked allow-list — verify mode is always read-only; no
@@ -269,13 +274,13 @@ async def run_verify_session(
         # reading/writing only under cwd / out_dir.
         tools=list(_VERIFY_ALLOWED_TOOLS),
         allowed_tools=list(_VERIFY_ALLOWED_TOOLS),
-        permission_mode=config.scan.permission_mode,
+        permission_mode=permission_mode_for_model(model, config.scan.permission_mode),
         settings=settings_json,
         model=model,
         cwd=str(cwd),
         # Same skill discovery path as scan mode — the SDK reads
         # ~/.claude/skills/vulnhunt-fix-verify/SKILL.md.
-        setting_sources=["user", "project", "local"],
+        setting_sources=setting_sources_for_model(model),
         skills="all",
     )
 

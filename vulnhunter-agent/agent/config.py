@@ -97,6 +97,20 @@ class SandboxConfig:
 
 
 @dataclass(frozen=True)
+class MythosConfig:
+    """Controls that are mandatory when ``claude-mythos-5`` is selected.
+
+    Mythos has no safety classifiers and mandatory 30-day request retention.
+    These settings intentionally cannot widen its inference endpoint or tool
+    policy; they only acknowledge retention and connect the CLI to the
+    inference-only proxy created by the hardened launcher.
+    """
+
+    data_retention_acknowledged: bool = False
+    https_proxy: str = ""
+
+
+@dataclass(frozen=True)
 class TelemetryConfig:
     enabled: bool
     otel_exporter_otlp_endpoint: str
@@ -370,6 +384,7 @@ class AgentConfig:
     verify: VerifyConfig
     logging: LoggingConfig
     audit: AuditConfig
+    mythos: MythosConfig = field(default_factory=MythosConfig)
     fix: FixConfig = field(default_factory=FixConfig)
     repo_properties: RepoPropertiesConfig = field(
         default_factory=RepoPropertiesConfig
@@ -476,6 +491,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AgentConfig:
     oauth_raw = raw.get("oauth", {})
     tls_raw = raw.get("tls", {})
     sandbox_raw = raw.get("sandbox", {})
+    mythos_raw = raw.get("mythos", {})
     telemetry_raw = raw.get("telemetry", {})
     scan_raw = raw.get("scan", {})
     github_raw = raw.get("github", {})
@@ -592,6 +608,21 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AgentConfig:
                 default=False,
             )
         ),
+    )
+
+    mythos = MythosConfig(
+        data_retention_acknowledged=bool(
+            _resolve(
+                mythos_raw,
+                "mythos",
+                "data_retention_acknowledged",
+                kind=bool,
+                default=False,
+            )
+        ),
+        https_proxy=str(
+            _resolve(mythos_raw, "mythos", "https_proxy", default="")
+        ).strip(),
     )
 
     telemetry = TelemetryConfig(
@@ -1110,6 +1141,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AgentConfig:
         oauth=oauth,
         tls=tls,
         sandbox=sandbox,
+        mythos=mythos,
         telemetry=telemetry,
         scan=scan,
         github=github,

@@ -1,0 +1,30 @@
+# The Mythos image build accepts the repository root as its context, but only
+# these runtime sources are needed. Keep local configs, clones, reports, Git
+# history, virtualenvs, and arbitrary workspace files out of the daemon context.
+**
+!vulnhunter-agent/
+!vulnhunter-agent/**
+!vulnhunt/
+!vulnhunt/**
+!vulnhunter-fix/
+!vulnhunter-fix/**
+!vulnhunt-fix-verify/
+!vulnhunt-fix-verify/**
+
+vulnhunter-agent/agent/config.toml
+**/.venv/
+vulnhunter-agent/clones/
+vulnhunter-agent/fix_runs/
+vulnhunter-agent/verify_runs/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.coverage
+**/*.egg-info/
+**/build/
+**/dist/
+**/.git/
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

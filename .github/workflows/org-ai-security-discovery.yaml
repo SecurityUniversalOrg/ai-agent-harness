@@ -7,14 +7,27 @@ on:
         description: Path to CSV containing repositories to scan
         required: false
         default: config/repos.csv
+      model:
+        description: Claude model execution profile
+        required: true
+        type: choice
+        default: claude-opus-4-8
+        options:
+          - claude-opus-4-7
+          - claude-opus-4-8
+          - claude-mythos-5
+      mythos_retention_acknowledged:
+        description: Acknowledge mandatory 30-day Mythos request retention (no ZDR)
+        required: false
+        type: boolean
+        default: false
 
 
   schedule:
     - cron: "30 7 * * 1"
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
   actions: read
 
 env:
@@ -42,7 +55,10 @@ jobs:
 
   scan-repositories:
     name: Scan ${{ matrix.owner }}/${{ matrix.repo }}
-    runs-on: ubuntu-latest
+    # Mythos fails closed onto an ephemeral/self-hosted Linux runner that has
+    # Docker's runsc runtime. Use an ARC runner scale set named `gvisor` for
+    # horizontal scaling. Scheduled runs default to Opus on ubuntu-latest.
+    runs-on: ${{ (inputs.model == 'claude-mythos-5') && 'gvisor' || 'ubuntu-latest' }}
     needs: build-matrix
 
     strategy:
@@ -57,64 +73,44 @@ jobs:
         with:
           path: ./
       
-      - name: Run Claude agent security scan
+      - name: (Temp until dedicated agent) Install Claude Skills
+        if: ${{ (inputs.model || 'claude-opus-4-8') != 'claude-mythos-5' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod +x ./install.sh && ./install.sh
+
+      - name: Run Opus Claude agent security scan
+        if: ${{ (inputs.model || 'claude-opus-4-8') != 'claude-mythos-5' }}
         uses: ./.github/actions/claude-agent-sec-scan
         with:
           aws-workspace-id: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
           aws-api-key: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
           scan-token: ${{ secrets.VULNHUNT_GITHUB_SCAN_TOKEN }}
           reports-token: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+          model: ${{ inputs.model || 'claude-opus-4-8' }}
+          repository-url: "https://github.com/${{ matrix.owner }}/${{ matrix.repo }}"
+          python-version: "3.12"
+          working-directory: ./vulnhunter-agent
+
+      - name: Run isolated Mythos security scan
+        if: ${{ inputs.model == 'claude-mythos-5' }}
+        uses: ./.github/actions/claude-agent-sec-scan
+        with:
+          aws-workspace-id: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
+          aws-api-key: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
+          scan-token: ${{ secrets.VULNHUNT_GITHUB_SCAN_TOKEN }}
+          model: claude-mythos-5
+          mythos-retention-acknowledged: ${{ inputs.mythos_retention_acknowledged }}
           repository-url: "https://github.com/${{ matrix.owner }}/${{ matrix.repo }}"
           python-version: "3.12"
           working-directory: ./vulnhunter-agent
 
       - name: Upload repository report artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.repo }}
           path: vulnhunter-agent/clones/${{ matrix.repo }}
           retention-days: 30
-
-  central-report-pr:
-    name: Update central reports and open PR
-    runs-on: ubuntu-latest
-    needs:
-      - scan-repositories
-
-    steps:
-      - name: Checkout central repo
-        uses: actions/checkout@v4
-        with:
-          path: central-repo
-          token: ${{ secrets.ORG_SECURITY_TOKEN }}
-
-      - name: Download repository report artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: downloaded-reports
-
-      - name: Update org_findings.csv and reports directory
-        uses: ./.github/actions/gh-update-org-findings
-        with:
-          central-repo-path: central-repo
-          downloaded-reports-path: downloaded-reports
-          org-findings-file: org_findings.csv
-          reports-directory: reports
-
-      - name: Upload org_findings artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: org_findings
-          path: org_findings.csv
-          retention-days: 30
-
-      - name: Create central reporting PR
-        uses: ./.github/actions/gh-create-central-report-pr
-        with:
-          token: ${{ secrets.ORG_SECURITY_TOKEN }}
-          central-repo-path: central-repo
-          branch-prefix: ${{ env.REPORT_BRANCH_PREFIX }}
-          commit-message: Update AI security triage reports
-          pr-title: Update AI security triage reports
-          pr-body: |
-            This PR updates repository-level AI security triage reports, exported GitHub security alert JSON files, generated SARIF files, mitigation reports, and the org_findings.csv rollup.

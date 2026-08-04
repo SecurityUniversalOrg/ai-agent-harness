@@ -44,6 +44,11 @@ from . import audit_extract as _audit_extract
 from .auth import make_token_manager
 from .build_settings import build_claude_settings
 from .config import AgentConfig
+from .model_policy import (
+    is_long_context_model,
+    permission_mode_for_model,
+    setting_sources_for_model,
+)
 from ._stream_events import (
     SessionTotals,
     _agent_name_from_started,
@@ -95,7 +100,7 @@ _READONLY_PROMPT_SUFFIX = (
 )
 
 
-_MODEL_FAMILIES = ("opus", "sonnet", "haiku", "gpt", "o3", "o1")
+_MODEL_FAMILIES = ("opus", "sonnet", "haiku", "mythos", "gpt", "o3", "o1")
 _LONG_CONTEXT_RE = re.compile(r"\[1m\]|_1m\b", re.IGNORECASE)
 
 
@@ -108,7 +113,8 @@ def _model_tag(model: str) -> str:
     on the model knowing what it is.
 
     The 1-million-context variant suffix (``[1m]`` or ``_1m``) is preserved
-    as ``_1m`` on the resulting tag, matching the skill's documented form.
+    as ``_1m`` on the resulting tag. Mythos 5 receives the same suffix because
+    its context window is intrinsically one million tokens.
 
     Examples:
         claude-opus-4-8         -> opus48
@@ -116,9 +122,10 @@ def _model_tag(model: str) -> str:
         claude-4.6-opus         -> opus46
         claude-sonnet-5         -> sonnet5
         claude-haiku-4-5        -> haiku45
+        claude-mythos-5         -> mythos5_1m
     """
     lowered = model.lower().replace("claude-", "")
-    long_context = bool(_LONG_CONTEXT_RE.search(lowered))
+    long_context = is_long_context_model(model)
     # Strip the long-context marker before extracting digits so its '1' and
     # 'm' don't pollute the version detection.
     cleaned = _LONG_CONTEXT_RE.sub("", lowered)
@@ -671,7 +678,11 @@ async def run_vulnhunt(
                 # workspace API keys are returned unchanged.
                 auth_token = token_manager.get_valid_token()
                 settings_json = build_claude_settings(
-                    config, auth_token, model=model, scan_id=scan_id
+                    config,
+                    auth_token,
+                    model=model,
+                    scan_id=scan_id,
+                    sandbox_allow_read_paths=[str(skill_path)],
                 )
                 options = ClaudeAgentOptions(
                     # `tools` is the *visibility* allow-list (what the model sees in
@@ -684,7 +695,9 @@ async def run_vulnhunt(
                     # allow-list with no permission prompts in headless mode.
                     tools=list(effective_tools),
                     allowed_tools=list(effective_tools),
-                    permission_mode=config.scan.permission_mode,
+                    permission_mode=permission_mode_for_model(
+                        model, config.scan.permission_mode
+                    ),
                     settings=settings_json,
                     model=model,
                     cwd=str(clone_dir),
@@ -693,7 +706,7 @@ async def run_vulnhunt(
                     # uppercase filename — the SDK's case-sensitive lookup is why this
                     # only worked on the case-insensitive macOS host before the rename).
                     # ``skills="all"`` enables every discovered skill.
-                    setting_sources=["user", "project", "local"],
+                    setting_sources=setting_sources_for_model(model),
                     skills="all",
                 )
                 session_result = await _run_scan_session(
