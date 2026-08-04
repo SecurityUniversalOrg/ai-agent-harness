@@ -6,6 +6,10 @@ set -Eeuo pipefail
 
 readonly PROXY_ALIAS="mythos-egress"
 readonly ALLOWED_HOST="aws-external-anthropic.us-east-1.api.aws"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# shellcheck source=scripts/_mythos_docker.sh
+source "${SCRIPT_DIR}/_mythos_docker.sh"
 
 die() {
   echo "::error::$*" >&2
@@ -15,6 +19,9 @@ die() {
 proof() {
   printf 'ISOLATION_PROOF %-30s %s\n' "$1" "$2"
 }
+
+mythos_configure_docker || die "Docker API access preflight failed"
+proof "docker-api-access" "${MYTHOS_DOCKER_ACCESS_MODE}; socket is retained only by the trusted host control plane"
 
 [[ -n "${MYTHOS_REPO_ROOT:-}" ]] || die "MYTHOS_REPO_ROOT is required"
 repo_root="$(cd "${MYTHOS_REPO_ROOT}" && pwd -P)"

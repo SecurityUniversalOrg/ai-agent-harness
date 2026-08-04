@@ -7,6 +7,10 @@ set -euo pipefail
 readonly MYTHOS_MODEL="claude-mythos-5"
 readonly MYTHOS_REGION="us-east-1"
 readonly PROXY_ALIAS="mythos-egress"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# shellcheck source=scripts/_mythos_docker.sh
+source "${SCRIPT_DIR}/_mythos_docker.sh"
 
 die() {
   echo "::error::$*" >&2
@@ -19,6 +23,8 @@ require_env() {
   [[ "${!name}" != *$'\n'* && "${!name}" != *$'\r'* ]] \
     || die "${name} contains a newline"
 }
+
+mythos_configure_docker || die "Docker API access preflight failed"
 
 for required in \
   TARGET_REPOSITORY \

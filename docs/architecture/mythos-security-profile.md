@@ -89,12 +89,18 @@ The composite action then selects the hardened launcher automatically.
 Provision the `gvisor` scale set as ephemeral Linux runners with:
 
 1. Docker Engine and the `runsc` runtime installed and registered.
-2. No persistent repository workspace between jobs.
-3. No workload identity or instance metadata available to job containers unless
+2. The runner service account in the group owning `/var/run/docker.sock` before
+   the runner service starts. The launcher can fall back to non-interactive
+   `sudo -n docker` without changing socket permissions, but direct access is
+   preferred. Docker control-plane access is root-equivalent, so use only
+   ephemeral, single-job runners and never expose the socket to the model
+   container.
+3. No persistent repository workspace between jobs.
+4. No workload identity or instance metadata available to job containers unless
    independently firewalled.
-4. Enough local disk to build the two runtime images and enough memory for the
+5. Enough local disk to build the two runtime images and enough memory for the
    configured 8 GiB agent cap.
-5. Runner-group access restricted to this workflow/repository.
+6. Runner-group access restricted to this workflow/repository.
 
 GitHub-hosted runners are not used for Mythos because this repository cannot attest
 that their Docker daemon exposes gVisor. The launcher never falls back to `runc`.
