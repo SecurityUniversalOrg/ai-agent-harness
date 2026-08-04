@@ -17,7 +17,9 @@ Primary provider references:
 ## Scope
 
 The scalable GitHub Actions profile supports read-only scan mode. It deliberately
-does not put report publishing or issue creation inside the Mythos container.
+does not put report publishing or issue creation inside the Mythos container. After
+a successful report export, the trusted runner performs an independently configurable
+delivery phase; publishing and repository issue submission both default to enabled.
 Application policy also recognizes Mythos for fix and verify, but requires
 `--no-post` (and `--no-reopen` for verify), forbids extra model egress, and expects
 inputs to be staged by a separate control plane.
@@ -43,7 +45,10 @@ flowchart LR
     control -->|AWS workspace credentials only| agent
     agent -->|CONNECT only| proxy[Non-root Squid allow-list proxy]
     proxy -->|TLS 443| aws[Claude Platform on AWS]
-    agent -->|report copied after exit| artifact[Actions artifact]
+    agent -->|validated report export| delivery[Trusted delivery process]
+    delivery --> artifact[Actions artifact]
+    delivery -->|reports token| reports[Central reports repository]
+    delivery -->|scan token| issues[Scanned repository issues]
 
     subgraph isolated[Internal Docker network]
         agent
@@ -51,10 +56,12 @@ flowchart LR
     end
 ```
 
-The control plane is trusted and short-lived. It owns cloning, image building, and
-artifact extraction. The model container is untrusted: it has no host bind mount,
-Docker socket, GitHub token, report token, cloud metadata route, or general Internet
-route. The checkout and all model state live on run-scoped tmpfs.
+The control plane is trusted and short-lived. It owns cloning, image building,
+artifact extraction, and configured delivery. The model container is untrusted: it
+has no host bind mount, Docker socket, GitHub token, report token, cloud metadata
+route, or general Internet route. The checkout and all model state live on run-scoped
+tmpfs. Delivery starts only after the launcher validates and exports exactly one
+standard-named, non-symlink results tree and emits the trusted checkout commit SHA.
 
 ## Layered controls
 
@@ -66,7 +73,7 @@ route. The checkout and all model state live on run-scoped tmpfs.
 | Process policy | Telemetry off; SDK sandbox forced on; fail if unavailable; unsandboxed fallback forbidden |
 | Tool policy | Scan is read-only; Bash cannot be enabled; model sees only the configured Read/Write/Glob/Agent envelope |
 | Settings isolation | Mythos loads only the installed user skill; target-controlled project/local Claude settings and hooks are not loaded |
-| Credential isolation | GitHub scan token is used only by the control plane; report token is not provided to the Mythos action path; AWS secrets use a mode-0600 Docker env file rather than argv |
+| Credential isolation | GitHub scan/report tokens exist only in trusted action steps and never enter the Mythos container; before no-tools post-scan finding-analysis calls, conventional GitHub credential variables are removed from the inherited child environment; AWS secrets use a mode-0600 Docker env file rather than argv |
 | Container boundary | `runsc`, non-root UID/GID 65532, read-only root, all Linux capabilities dropped, `no-new-privileges`, no devices/mounts/socket, private IPC, PID/file/memory/CPU limits |
 | Mutable storage | `/workspace`, `/tmp`, `~/.claude`, and `~/.vulnhunter` are size-bounded tmpfs with `nodev`, `nosuid`, and `noexec`; audit paths are absolute and the audit JSONL streams are exported with the report |
 | Network boundary | Agent attaches only to an `--internal` user-defined Docker network; the proxy is dual-homed on that network and a separate run-scoped user-defined egress bridge; direct agent socket egress is tested and must fail |
@@ -76,7 +83,7 @@ route. The checkout and all model state live on run-scoped tmpfs.
 | Startup attestation | Launcher checks the runtime exists, then verifies Docker reports `Runtime=runsc`, the intended network, and a read-only root before setting `VULNHUNT_MYTHOS_HARDENED_RUNTIME=1` |
 | Auditable preflight | The composite action first launches a credential-free disposable canary under the same gVisor, filesystem, capability, namespace, and egress constraints; it prints sanitized `ISOLATION_PROOF` records and fails unless direct HTTP/HTTPS and proxied `example.com` access are denied and the allowlisted AWS endpoint completes a CA- and hostname-verified TLS handshake |
 | Egress canaries | Before inference, direct `1.1.1.1:443` must fail, `CONNECT example.com:443` must return 403, and the exact AWS CONNECT must return 200 |
-| Output boundary | Model output is copied out only after execution; publishing and issue mutation are separate, explicitly authorized operations |
+| Output boundary | Model output is copied out only after execution; delivery revalidates the local results basename and source SHA before publishing or issue mutation |
 
 These are defense-in-depth layers. gVisor reduces exposure to the host kernel, but
 it is not a proof that escape is impossible. The Docker daemon and runner control
@@ -113,6 +120,18 @@ For horizontal scaling, use an Actions Runner Controller runner scale set named
 
 Select Mythos through workflow dispatch and check the retention acknowledgement.
 The action passes the model dynamically; no committed secret-bearing TOML is needed.
+The workflow exposes two independent booleans, both defaulting to `true`:
+
+- `publish_results` controls central report publication.
+- `submit_repo_issues` controls finding issue creation/update in the scanned repo.
+
+For scheduled runs, repository variables `VULNHUNT_PUBLISH_RESULTS=false` and
+`VULNHUNT_SUBMIT_REPO_ISSUES=false` disable the corresponding operation. The central
+destination defaults to the workflow repository and can be overridden with
+`VULNHUNT_REPORTS_REPOSITORY`; `VULNHUNT_REPORTS_BRANCH` defaults to `main`. A
+`VULNHUNT_GITHUB_REPORTS_TOKEN` secret is required only when publishing is enabled.
+Issue-only runs omit central links and tell maintainers to use the retained Actions
+artifact. Artifact upload remains enabled regardless of either delivery toggle.
 For a direct, already-isolated invocation the equivalent config is:
 
 ```toml

@@ -19,6 +19,26 @@ inputs:
     description: GitHub token used to read and publish VulnHunter reports
     required: false
 
+  publish-results:
+    description: Publish the report to the central reports repository
+    required: false
+    default: "true"
+
+  submit-repo-issues:
+    description: Create or update findings issues in the scanned repository
+    required: false
+    default: "true"
+
+  reports-repository-url:
+    description: Central reports repository URL (defaults to the calling workflow repository)
+    required: false
+    default: ""
+
+  reports-branch:
+    description: Branch used in the central reports repository
+    required: false
+    default: main
+
   model:
     description: Reviewed model ID (claude-opus-4-7, claude-opus-4-8, or claude-mythos-5)
     required: false
@@ -48,7 +68,7 @@ runs:
 
   steps:
     - name: Set up Python
-      if: inputs.model != 'claude-mythos-5'
+      if: inputs.model != 'claude-mythos-5' || inputs.publish-results == 'true' || inputs.submit-repo-issues == 'true'
       uses: actions/setup-python@v6
       with:
         python-version: ${{ inputs.python-version }}
@@ -63,6 +83,10 @@ runs:
         TARGET_REPOSITORY: ${{ inputs.repository-url }}
         MODEL: ${{ inputs.model }}
         MYTHOS_RETENTION_ACKNOWLEDGED: ${{ inputs.mythos-retention-acknowledged }}
+        PUBLISH_RESULTS: ${{ inputs.publish-results }}
+        SUBMIT_REPO_ISSUES: ${{ inputs.submit-repo-issues }}
+        REPORTS_REPOSITORY_URL: ${{ inputs.reports-repository-url || format('{0}/{1}', github.server_url, github.repository) }}
+        REPORTS_BRANCH: ${{ inputs.reports-branch }}
       run: |
         set -euo pipefail
 
@@ -98,20 +122,51 @@ runs:
             ;;
         esac
 
-        if [[ "${MODEL}" == "claude-mythos-5" ]]; then
-          if [[ "${MYTHOS_RETENTION_ACKNOWLEDGED}" != "true" ]]; then
-            echo "::error::Mythos requires mythos-retention-acknowledged=true (mandatory 30-day retention; no ZDR)."
+        for toggle_name in PUBLISH_RESULTS SUBMIT_REPO_ISSUES; do
+          toggle_value="${!toggle_name}"
+          if [[ "${toggle_value}" != "true" && "${toggle_value}" != "false" ]]; then
+            echo "::error::${toggle_name} must be exactly 'true' or 'false'; got '${toggle_value}'."
             exit 1
           fi
-        elif [[ -z "${REPORTS_TOKEN}" ]]; then
-          echo "::error::The reports-token input is required for the Opus execution profile."
-          exit 1
-        else
+        done
+
+        if [[ -n "${REPORTS_TOKEN}" ]]; then
           if [[ "${REPORTS_TOKEN}" == *$'\n'* || "${REPORTS_TOKEN}" == *$'\r'* ]]; then
             echo "::error::The reports-token input must be a single line."
             exit 1
           fi
           echo "::add-mask::${REPORTS_TOKEN}"
+        fi
+
+        if [[ "${PUBLISH_RESULTS}" == "true" ]]; then
+          if [[ -z "${REPORTS_TOKEN}" ]]; then
+            echo "::error::reports-token is required when publish-results=true."
+            exit 1
+          fi
+          if [[ -z "${REPORTS_REPOSITORY_URL}" ]]; then
+            echo "::error::reports-repository-url is required when publish-results=true."
+            exit 1
+          fi
+          if [[ "${REPORTS_REPOSITORY_URL}" == *$'\n'* || "${REPORTS_REPOSITORY_URL}" == *$'\r'* ]]; then
+            echo "::error::reports-repository-url must be a single line."
+            exit 1
+          fi
+          if ! git check-ref-format --branch "${REPORTS_BRANCH}" >/dev/null 2>&1; then
+            echo "::error::reports-branch is not a valid Git branch name."
+            exit 1
+          fi
+        fi
+
+        if [[ "${MODEL}" == "claude-mythos-5" ]]; then
+          if [[ "${MYTHOS_RETENTION_ACKNOWLEDGED}" != "true" ]]; then
+            echo "::error::Mythos requires mythos-retention-acknowledged=true (mandatory 30-day retention; no ZDR)."
+            exit 1
+          fi
+        fi
+
+        echo "Delivery configuration: publish-results=${PUBLISH_RESULTS}, submit-repo-issues=${SUBMIT_REPO_ISSUES}"
+        if [[ "${PUBLISH_RESULTS}" == "true" ]]; then
+          echo "Central reports destination is configured on branch ${REPORTS_BRANCH}."
         fi
 
 
@@ -128,6 +183,12 @@ runs:
         VULNHUNT_ANTHROPIC_MODEL: ${{ inputs.model }}
         VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.scan-token }}
         VULNHUNT_GITHUB_REPORTS_TOKEN: ${{ inputs.reports-token }}
+        VULNHUNT_PUBLISH_ENABLED: ${{ inputs.publish-results }}
+        VULNHUNT_PUBLISH_DESTINATION_REPO: ${{ inputs.reports-repository-url || format('{0}/{1}', github.server_url, github.repository) }}
+        VULNHUNT_PUBLISH_BRANCH: ${{ inputs.reports-branch }}
+        VULNHUNT_ISSUES_ENABLED: ${{ inputs.submit-repo-issues }}
+        PUBLISH_RESULTS: ${{ inputs.publish-results }}
+        SUBMIT_REPO_ISSUES: ${{ inputs.submit-repo-issues }}
         TARGET_REPOSITORY: ${{ inputs.repository-url }}
         PYTHONUNBUFFERED: "1"
       run: |
@@ -142,10 +203,16 @@ runs:
         python3 -m pip install -e ".[dev]"
 
         echo "Scanning repository: ${TARGET_REPOSITORY}"
+        publish_arg="--no-publish"
+        issues_arg="--no-issues"
+        [[ "${PUBLISH_RESULTS}" == "true" ]] && publish_arg="--publish"
+        [[ "${SUBMIT_REPO_ISSUES}" == "true" ]] && issues_arg="--issues"
         python3 -m agent \
           --mode=scan \
           --model "${VULNHUNT_ANTHROPIC_MODEL}" \
           --config agent/config.toml \
+          "${publish_arg}" \
+          "${issues_arg}" \
           "${TARGET_REPOSITORY}"
 
     - name: Validate and attest Mythos gVisor isolation
@@ -172,6 +239,7 @@ runs:
         rm -f -- "${proof_log}"
 
     - name: Run isolated Mythos scan with gVisor
+      id: mythos_scan
       if: inputs.model == 'claude-mythos-5'
       shell: bash
       env:
@@ -189,3 +257,62 @@ runs:
         set -euo pipefail
         chmod +x "${GITHUB_ACTION_PATH}/../../../scripts/run_mythos_sandbox.sh"
         "${GITHUB_ACTION_PATH}/../../../scripts/run_mythos_sandbox.sh"
+
+    - name: Deliver Mythos results
+      if: inputs.model == 'claude-mythos-5' && (inputs.publish-results == 'true' || inputs.submit-repo-issues == 'true')
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        # This trusted post-sandbox process is deliberately separate from the
+        # Mythos container. Neither GitHub credential is present in that
+        # container, its env-file, or its Docker inspect metadata.
+        VULNHUNT_ANTHROPIC_AUTH_MODE: anthropic_aws
+        VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
+        VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
+        VULNHUNT_ANTHROPIC_AWS_REGION: us-east-1
+        VULNHUNT_ANTHROPIC_MODEL: claude-opus-4-8
+        VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.scan-token }}
+        VULNHUNT_GITHUB_REPORTS_TOKEN: ${{ inputs.reports-token }}
+        VULNHUNT_PUBLISH_ENABLED: ${{ inputs.publish-results }}
+        VULNHUNT_PUBLISH_DESTINATION_REPO: ${{ inputs.reports-repository-url || format('{0}/{1}', github.server_url, github.repository) }}
+        VULNHUNT_PUBLISH_BRANCH: ${{ inputs.reports-branch }}
+        VULNHUNT_ISSUES_ENABLED: ${{ inputs.submit-repo-issues }}
+        VULNHUNT_AUDIT_ENABLED: "false"
+        PUBLISH_RESULTS: ${{ inputs.publish-results }}
+        SUBMIT_REPO_ISSUES: ${{ inputs.submit-repo-issues }}
+        TARGET_REPOSITORY: ${{ inputs.repository-url }}
+        RESULTS_DIR: ${{ steps.mythos_scan.outputs.results_dir }}
+        SOURCE_COMMIT: ${{ steps.mythos_scan.outputs.source_commit }}
+        PYTHONUNBUFFERED: "1"
+      run: |
+        set -euo pipefail
+
+        [[ -n "${RESULTS_DIR}" && -d "${RESULTS_DIR}" ]] || {
+          echo "::error::The Mythos scan did not export a deliverable results directory."
+          exit 1
+        }
+        [[ "${SOURCE_COMMIT}" =~ ^[0-9a-fA-F]{7,64}$ ]] || {
+          echo "::error::The Mythos scan did not emit a valid source commit."
+          exit 1
+        }
+
+        python3 -m venv .delivery-venv
+        source .delivery-venv/bin/activate
+        python3 -m pip install -e "."
+
+        publish_arg="--no-publish"
+        issues_arg="--no-issues"
+        [[ "${PUBLISH_RESULTS}" == "true" ]] && publish_arg="--publish"
+        [[ "${SUBMIT_REPO_ISSUES}" == "true" ]] && issues_arg="--issues"
+
+        python3 -m agent \
+          --mode=scan \
+          --model claude-opus-4-8 \
+          --config agent/config.example.toml \
+          --no-scan \
+          --results-dir "${RESULTS_DIR}" \
+          --source-commit "${SOURCE_COMMIT}" \
+          "${publish_arg}" \
+          "${issues_arg}" \
+          --issues-target-repo "${TARGET_REPOSITORY}" \
+          "${TARGET_REPOSITORY}"

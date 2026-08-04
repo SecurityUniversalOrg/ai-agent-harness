@@ -21,6 +21,16 @@ on:
         required: false
         type: boolean
         default: false
+      publish_results:
+        description: Publish reports to the central repository
+        required: false
+        type: boolean
+        default: true
+      submit_repo_issues:
+        description: Create or update findings issues in scanned repositories
+        required: false
+        type: boolean
+        default: true
 
 
   schedule:
@@ -89,6 +99,10 @@ jobs:
           aws-api-key: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
           scan-token: ${{ secrets.VULNHUNT_GITHUB_SCAN_TOKEN }}
           reports-token: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+          publish-results: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_results) || (github.event_name != 'workflow_dispatch' && vars.VULNHUNT_PUBLISH_RESULTS != 'false') }}
+          submit-repo-issues: ${{ (github.event_name == 'workflow_dispatch' && inputs.submit_repo_issues) || (github.event_name != 'workflow_dispatch' && vars.VULNHUNT_SUBMIT_REPO_ISSUES != 'false') }}
+          reports-repository-url: ${{ vars.VULNHUNT_REPORTS_REPOSITORY || format('{0}/{1}', github.server_url, github.repository) }}
+          reports-branch: ${{ vars.VULNHUNT_REPORTS_BRANCH || 'main' }}
           model: ${{ inputs.model || 'claude-opus-4-8' }}
           repository-url: "https://github.com/${{ matrix.owner }}/${{ matrix.repo }}"
           python-version: "3.12"
@@ -101,6 +115,11 @@ jobs:
           aws-workspace-id: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
           aws-api-key: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
           scan-token: ${{ secrets.VULNHUNT_GITHUB_SCAN_TOKEN }}
+          reports-token: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+          publish-results: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_results) || (github.event_name != 'workflow_dispatch' && vars.VULNHUNT_PUBLISH_RESULTS != 'false') }}
+          submit-repo-issues: ${{ (github.event_name == 'workflow_dispatch' && inputs.submit_repo_issues) || (github.event_name != 'workflow_dispatch' && vars.VULNHUNT_SUBMIT_REPO_ISSUES != 'false') }}
+          reports-repository-url: ${{ vars.VULNHUNT_REPORTS_REPOSITORY || format('{0}/{1}', github.server_url, github.repository) }}
+          reports-branch: ${{ vars.VULNHUNT_REPORTS_BRANCH || 'main' }}
           model: claude-mythos-5
           mythos-retention-acknowledged: ${{ inputs.mythos_retention_acknowledged }}
           repository-url: "https://github.com/${{ matrix.owner }}/${{ matrix.repo }}"

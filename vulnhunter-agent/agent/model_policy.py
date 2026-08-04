@@ -145,7 +145,7 @@ def enforce_mythos_mode_policy(
             raise ValueError(
                 "claude-mythos-5 runs in an inference-only container. Publish "
                 "and issue delivery must run later in a separate control-plane "
-                "process that has no model credential."
+                "process; no GitHub credential may enter the Mythos container."
             )
     elif mode == "fix":
         if not no_post:

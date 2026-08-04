@@ -6,6 +6,8 @@ Usage (scan mode):
                                             [--scan | --no-scan]
                                             [--publish | --no-publish]
                                             [--issues | --no-issues]
+                                            [--results-dir PATH]
+                                            [--source-commit SHA]
                                             [--issues-target-repo URL]
                                             [--audit | --no-audit]
                                             [--audit-events-path PATH]
@@ -34,12 +36,11 @@ Usage (fix mode):
 invocations like ``python -m agent <repo-url>`` fail with a clear
 parser error.
 
-Scan-mode toggles default to scan/publish/issues all enabled (publish
-takes its default from config). The issues stage requires either
-``--scan`` (so we have a fresh report) or a previous published report
-we can download. ``--scan + --no-publish + --issues`` is incoherent
-(issues link to a report that wouldn't exist remotely) and is
-rejected up front.
+Scan defaults to enabled; publish and issues take their defaults from
+configuration. ``--results-dir`` enables a trusted ``--no-scan`` delivery
+process for output exported from an isolated model runtime. Issues may be
+submitted without central publishing; their bodies then direct readers to the
+retained workflow artifact instead of a central-report link.
 """
 
 from __future__ import annotations
@@ -48,6 +49,8 @@ import argparse
 import asyncio
 import dataclasses
 import logging
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -153,6 +156,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional identifier embedded in OTEL resource attributes",
     )
+    scan_section.add_argument(
+        "--results-dir",
+        default=None,
+        help="Deliver an existing local *_VULNHUNT_RESULTS_* directory. "
+        "Requires --no-scan and is intended for a trusted post-sandbox "
+        "publish/issues process.",
+    )
+    scan_section.add_argument(
+        "--source-commit",
+        default=None,
+        help="Source commit for --results-dir publishing/report links "
+        "(7-64 hexadecimal characters; default: unknown).",
+    )
 
     scan_group = scan_section.add_mutually_exclusive_group()
     scan_group.add_argument(
@@ -167,8 +183,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="scan",
         action="store_false",
         default=None,
-        help="Skip scanning. Requires --issues; downloads the most recent "
-        "published report from publish.destination_repo for the target.",
+        help="Skip scanning. With --results-dir, deliver that local report; "
+        "otherwise --issues downloads the latest published report.",
     )
 
     publish_group = scan_section.add_mutually_exclusive_group()
@@ -451,14 +467,90 @@ def _short_sha(clone_dir: object) -> str:
     return sha or "unknown"
 
 
+_RESULTS_DIR_NAME_RE = re.compile(
+    r"^[A-Za-z0-9._-]+_VULNHUNT_RESULTS_[A-Za-z0-9._-]+$"
+)
+_SOURCE_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_GITHUB_CREDENTIAL_ENV_NAMES = (
+    "GH_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_TOKEN",
+    "VULNHUNT_GITHUB_SCAN_TOKEN",
+    "VULNHUNT_GITHUB_REPORTS_TOKEN",
+)
+
+
+def _resolve_local_results(path_value: str | None) -> Path | None:
+    """Validate a caller-supplied report tree before trusted delivery.
+
+    Mythos output is model-influenced data copied out of a sandbox. Delivery
+    accepts only a real, non-symlink directory with the standard VulnHunter
+    basename so an attacker cannot redirect publishing through a link or
+    inject path separators into the destination layout.
+    """
+    if path_value is None:
+        return None
+    candidate = Path(path_value).expanduser()
+    if candidate.is_symlink():
+        raise ValueError("--results-dir must not be a symbolic link.")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"--results-dir could not be resolved: {exc}") from exc
+    if not resolved.is_dir():
+        raise ValueError(f"--results-dir is not a directory: {resolved}")
+    if not _RESULTS_DIR_NAME_RE.fullmatch(resolved.name):
+        raise ValueError(
+            "--results-dir basename must match "
+            "<repo>_VULNHUNT_RESULTS_<model-and-timestamp>."
+        )
+    readme = resolved / "README.md"
+    if readme.is_symlink() or not readme.is_file():
+        raise ValueError("--results-dir must contain a regular README.md report.")
+    for entry in resolved.rglob("*"):
+        if entry.is_symlink():
+            raise ValueError(f"--results-dir contains a symbolic link: {entry}")
+        if not entry.is_file() and not entry.is_dir():
+            raise ValueError(f"--results-dir contains a special file: {entry}")
+    return resolved
+
+
+def _resolve_source_commit(value: str | None) -> str:
+    """Return a path-safe source commit segment for local delivery."""
+    if value is None or value == "":
+        return "unknown"
+    if not _SOURCE_COMMIT_RE.fullmatch(value):
+        raise ValueError("--source-commit must contain 7-64 hexadecimal characters.")
+    return value.lower()
+
+
+def _scrub_github_credential_environment() -> None:
+    """Prevent post-scan SDK children from inheriting GitHub secrets.
+
+    Config is already loaded and frozen before this runs. Subsequent GitHub API
+    calls use those config values directly, while short-lived no-tools Claude
+    subprocesses inherit none of the conventional GitHub credential variables.
+    """
+    removed = [
+        name
+        for name in _GITHUB_CREDENTIAL_ENV_NAMES
+        if os.environ.pop(name, None)
+    ]
+    if removed:
+        logging.info(
+            "Removed GitHub credential variables from child-process environment: %s",
+            ", ".join(removed),
+        )
+
+
 def _resolve_modes(
     args: argparse.Namespace, config: AgentConfig
 ) -> tuple[bool, bool, bool]:
     """Resolve the (scan, publish, issues) tristate flags + config defaults.
 
-    Each flag defaults to True if not explicitly set; publish additionally
-    falls through to the config value (which is True/False explicit).
-    Then we validate the combination — see _validate_modes.
+    Scan defaults to true. Publish and issues fall through to their explicit
+    config booleans when the corresponding CLI override is absent. Then we
+    validate the combination — see _validate_modes.
     """
     scan = True if args.scan is None else args.scan
     if args.publish is None:
@@ -473,7 +565,12 @@ def _resolve_modes(
 
 
 def _validate_modes(
-    *, scan: bool, publish: bool, issues: bool, config: AgentConfig
+    *,
+    scan: bool,
+    publish: bool,
+    issues: bool,
+    config: AgentConfig,
+    local_results: bool = False,
 ) -> None:
     """Reject incoherent toggle combinations before we do any work."""
     if not scan and not publish and not issues:
@@ -481,13 +578,14 @@ def _validate_modes(
             "Nothing to do: --no-scan + --no-publish + --no-issues. "
             "Enable at least one stage."
         )
-    if scan and not publish and issues:
+    if scan and local_results:
+        raise ValueError("--results-dir requires --no-scan.")
+    if not scan and publish and not issues and not local_results:
         raise ValueError(
-            "--scan + --no-publish + --issues is incoherent: posted issues "
-            "embed a link to the published report, but the report wouldn't "
-            "be uploaded. Either flip --publish on, or pass --no-issues."
+            "--no-scan + --publish requires --results-dir; there is no local "
+            "report to upload."
         )
-    if not scan and issues:
+    if not scan and issues and not local_results:
         if not config.publish.destination_repo:
             raise ValueError(
                 "--no-scan + --issues requires publish.destination_repo to be "
@@ -496,7 +594,8 @@ def _validate_modes(
     # Token presence is required by stage, not blanket.
     # - issues needs scan_token (post + label + dedup-fetch on target repo)
     # - publish needs reports_token (push to destination_repo)
-    # - --no-scan + --issues additionally needs reports_token (download prior report)
+    # - remote --no-scan + --issues additionally needs reports_token to download
+    # - local --results-dir + --issues does not need reports_token
     # In broker mode the literals are empty by design; defer the check to
     # the preflight step (TOKEN-CLIENT-005) which talks to GitHub directly.
     if config.github.broker_token_dir:
@@ -511,7 +610,7 @@ def _validate_modes(
             "--publish requires [github] reports_token (used to push results "
             "to publish.destination_repo)."
         )
-    if not scan and issues and not config.github.reports_token:
+    if not scan and issues and not local_results and not config.github.reports_token:
         raise ValueError(
             "--no-scan + --issues requires [github] reports_token (used to "
             "download the latest report from publish.destination_repo)."
@@ -522,12 +621,15 @@ class PreflightError(RuntimeError):
     """Raised when a configured GitHub token fails its startup auth check."""
 
 
-def _required_roles(*, scan: bool, publish: bool, issues: bool) -> list[GitHubRole]:
+def _required_roles(
+    *, scan: bool, publish: bool, issues: bool, local_results: bool = False
+) -> list[GitHubRole]:
     """Per-stage role requirements (standalone preflight only).
 
     - issues          → scan (label/list/post on target)
     - publish         → reports (push to destination_repo)
-    - --no-scan+issues→ reports (download prior report from destination_repo)
+    - remote --no-scan+issues → reports (download from destination_repo)
+    - local --results-dir+issues → no reports role unless publish is also enabled
     Clone alone (scan=True, publish=issues=False) does not require a
     token unless the repo is private — we don't know that at startup,
     so we don't preflight it (the clone will fail loudly if denied).
@@ -535,7 +637,7 @@ def _required_roles(*, scan: bool, publish: bool, issues: bool) -> list[GitHubRo
     roles: list[GitHubRole] = []
     if issues:
         roles.append("scan")
-    if publish or (not scan and issues):
+    if publish or (not scan and issues and not local_results):
         if "reports" not in roles:
             roles.append("reports")
     return roles
@@ -547,6 +649,7 @@ def _preflight_standalone_tokens(
     scan: bool,
     publish: bool,
     issues: bool,
+    local_results: bool = False,
     timeout_seconds: int = 30,
 ) -> None:
     """Hit ``GET /installation/repositories`` once per needed role.
@@ -572,7 +675,12 @@ def _preflight_standalone_tokens(
     diagnostic headers so operators can distinguish scope vs. SSO
     vs. token-mismatch at a glance.
     """
-    roles = _required_roles(scan=scan, publish=publish, issues=issues)
+    roles = _required_roles(
+        scan=scan,
+        publish=publish,
+        issues=issues,
+        local_results=local_results,
+    )
     if not roles:
         return
     api = api_base(config.github.host)
@@ -818,8 +926,25 @@ async def _run_scan_flow(
     repo_url = args.targets[0]
 
     scan, publish, issues = _resolve_modes(args, config)
-    _validate_modes(scan=scan, publish=publish, issues=issues, config=config)
-    logging.info("Stages: scan=%s publish=%s issues=%s", scan, publish, issues)
+    local_results_dir = _resolve_local_results(args.results_dir)
+    local_results = local_results_dir is not None
+    source_commit_override = _resolve_source_commit(args.source_commit)
+    if args.source_commit is not None and not local_results:
+        raise ValueError("--source-commit requires --results-dir.")
+    _validate_modes(
+        scan=scan,
+        publish=publish,
+        issues=issues,
+        config=config,
+        local_results=local_results,
+    )
+    logging.info(
+        "Stages: scan=%s local_results=%s publish=%s issues=%s",
+        scan,
+        local_results,
+        publish,
+        issues,
+    )
 
     # Apply the model-specific profile before token preflight, repository
     # property lookup, or clone. This also covers --model overrides, which are
@@ -843,7 +968,11 @@ async def _run_scan_flow(
     # credentials, and the agent reads on demand thereafter.
     if not config.github.broker_token_dir:
         _preflight_standalone_tokens(
-            config=config, scan=scan, publish=publish, issues=issues
+            config=config,
+            scan=scan,
+            publish=publish,
+            issues=issues,
+            local_results=local_results,
         )
 
     # Preflight the optional operator-defined findings-stream metadata
@@ -901,7 +1030,7 @@ async def _run_scan_flow(
     scan_totals = SessionTotals()
     extracted = None
     summary: PostSummary | None = None
-    results_dir: Path | None = None
+    results_dir: Path | None = local_results_dir
 
     def _persist_manifest(final_exit_code: int) -> None:
         """Serialize the aggregate scan state to ``scan_manifest.json``.
@@ -958,6 +1087,10 @@ async def _run_scan_flow(
                 print("Results:  (no *_VULNHUNT_RESULTS_* directory found in the clone)")
                 return 1
             print(f"Results:  {results_dir}")
+        elif local_results:
+            print()
+            print("Clone:    skipped (--no-scan)")
+            print(f"Results:  {results_dir} (existing local report)")
         else:
             print()
             print("Clone:    skipped (--no-scan)")
@@ -966,11 +1099,16 @@ async def _run_scan_flow(
         # ---- Publish stage -----------------------------------------------
         # Compute commit SHA once. Publish and the clean-scan receipt both
         # need it; the findings-issues report URL takes it too. Only
-        # computable when we scanned locally; the --no-scan / download
-        # path leaves it as "unknown".
-        commit_sha = _short_sha(clone_dir) if scan and clone_dir is not None else "unknown"
+        # computable when we scanned locally and supplied explicitly for a
+        # trusted local-results handoff; remote-download paths use "unknown".
+        if scan and clone_dir is not None:
+            commit_sha = _short_sha(clone_dir)
+        elif local_results:
+            commit_sha = source_commit_override
+        else:
+            commit_sha = "unknown"
         report_url: str | None = None
-        if scan and publish:
+        if results_dir is not None and publish and (scan or local_results):
             try:
                 sha = publish_results(
                     results_dir,
@@ -997,9 +1135,9 @@ async def _run_scan_flow(
                     publish_branch=config.publish.branch,
                     source_repo_url=repo_url,
                     source_commit_hash=commit_sha,
-                    results_dir=results_dir,  # type: ignore[arg-type]
+                    results_dir=results_dir,
                 )
-        elif scan:
+        elif scan or local_results:
             # We're here only because publish is False. Either the user
             # passed --no-publish (args.publish is False) or the config
             # default is False (args.publish is None).
@@ -1018,7 +1156,7 @@ async def _run_scan_flow(
             print(f"Publish:  skipped ({source})")
 
         # ---- Download-latest stage (when --no-scan + --issues) ----------
-        if not scan and issues:
+        if not scan and issues and not local_results:
             try:
                 download = download_latest_report(
                     repo_url,
@@ -1038,6 +1176,13 @@ async def _run_scan_flow(
             )
 
         # ---- Issues stage ------------------------------------------------
+        # Publishing/download/clone have finished, so no remaining operation
+        # needs a credential from process environment. GitHub clients below
+        # use the immutable loaded config; no-tools Claude subprocesses used
+        # for finding extraction/dedup therefore cannot inherit either token.
+        if issues or (audit_writer is not None and results_dir is not None):
+            _scrub_github_credential_environment()
+
         # Extraction is done up-front (and shared with the audit stream)
         # so we don't pay for it twice when both --audit and --issues are
         # enabled. Skipped when we have nothing to feed it to.
@@ -1090,7 +1235,7 @@ async def _run_scan_flow(
             try:
                 summary = await issues_stage.post_issues(
                     results_dir=results_dir,
-                    report_url=report_url,
+                    report_url=report_url or "",
                     target_repo_url=target_repo_url,
                     config=config,
                     token_manager=token_manager,
@@ -1379,6 +1524,10 @@ def main(argv: list[str] | None = None) -> int:
             scan_only_flags.append("--re-clone")
         if args.scan_id:
             scan_only_flags.append("--scan-id")
+        if args.results_dir is not None:
+            scan_only_flags.append("--results-dir")
+        if args.source_commit is not None:
+            scan_only_flags.append("--source-commit")
         if args.scan is not None:
             scan_only_flags.append("--scan/--no-scan")
         if args.publish is not None:
@@ -1411,6 +1560,10 @@ def main(argv: list[str] | None = None) -> int:
             fix_invalid_flags.append("--re-clone")
         if args.scan_id:
             fix_invalid_flags.append("--scan-id")
+        if args.results_dir is not None:
+            fix_invalid_flags.append("--results-dir")
+        if args.source_commit is not None:
+            fix_invalid_flags.append("--source-commit")
         if args.scan is not None:
             fix_invalid_flags.append("--scan/--no-scan")
         if args.publish is not None:

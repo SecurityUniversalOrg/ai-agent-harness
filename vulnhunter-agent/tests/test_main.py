@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -213,6 +215,127 @@ def test_main_publish_enabled_succeeds(
     assert "Publish:  https://github.com/o/results@main (abcdef12)" in captured
 
 
+def test_main_delivers_exported_local_results_without_scanning_or_downloading(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    agent_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from agent.config import GitHubConfig, PublishConfig
+
+    cfg = agent_config(
+        github=GitHubConfig(
+            host="github.com",
+            scan_token="ghp_scan",
+            reports_token="ghp_reports",
+            broker_token_dir="",
+        ),
+        publish=PublishConfig(
+            enabled=True,
+            destination_repo="https://github.com/o/results",
+            branch="main",
+            commit_author_name="bot",
+            commit_author_email="bot@example.com",
+        ),
+    )
+    results = (
+        tmp_path / "repo_VULNHUNT_RESULTS_mythos5_1m_2026-08-04-141335"
+    )
+    results.mkdir()
+    (results / "README.md").write_text("# Report\n", encoding="utf-8")
+    calls = _patch_main_dependencies(
+        monkeypatch,
+        config=cfg,
+        clone_dir=tmp_path / "unused-clone",
+        results_dir=None,
+        publish_sha="abcdef1234",
+    )
+
+    rc = main(
+        [
+            "--mode=scan",
+            "https://github.com/o/r",
+            "--no-scan",
+            "--results-dir",
+            str(results),
+            "--source-commit",
+            "ABCDEF123456",
+            "--publish",
+            "--no-issues",
+        ]
+    )
+
+    captured = capsys.readouterr().out
+    assert rc == 0
+    assert calls["shallow"] == 0
+    assert calls["run"] == 0
+    assert calls["download"] == 0
+    assert calls["publish"] == 1
+    assert f"Results:  {results.resolve()} (existing local report)" in captured
+
+
+def test_main_submits_issues_from_local_results_without_central_publish(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    populated_agent_config,
+) -> None:
+    from agent.issues_extract import ExtractedReport
+
+    cfg = replace(
+        populated_agent_config,
+        github=replace(
+            populated_agent_config.github,
+            scan_token="ghp_scan",
+            reports_token="",
+        ),
+        publish=replace(
+            populated_agent_config.publish,
+            enabled=False,
+            destination_repo="",
+        ),
+        issues=replace(populated_agent_config.issues, enabled=True),
+    )
+    results = (
+        tmp_path / "repo_VULNHUNT_RESULTS_mythos5_1m_2026-08-04-141335"
+    )
+    results.mkdir()
+    (results / "README.md").write_text("# Report\n", encoding="utf-8")
+    calls = _patch_main_dependencies(
+        monkeypatch,
+        config=cfg,
+        clone_dir=tmp_path / "unused-clone",
+        results_dir=None,
+    )
+
+    async def fake_extract(*_args: object, **_kwargs: object) -> ExtractedReport:
+        return ExtractedReport(
+            findings=[],
+            scan_date="2026-08-04",
+            results_dir_name=results.name,
+        )
+
+    monkeypatch.setattr(main_mod.issues_extract, "extract_findings", fake_extract)
+
+    rc = main(
+        [
+            "--mode=scan",
+            "https://github.com/o/r",
+            "--no-scan",
+            "--results-dir",
+            str(results),
+            "--no-publish",
+            "--issues",
+        ]
+    )
+
+    assert rc == 0
+    assert calls["shallow"] == 0
+    assert calls["run"] == 0
+    assert calls["download"] == 0
+    assert calls["publish"] == 0
+    assert calls["post_issues"] == 1
+
+
 def test_main_publish_disabled_via_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -386,9 +509,12 @@ def test_main_unhandled_exception_returns_1(
 # ---------------------------------------------------------------------------
 
 
-from dataclasses import replace  # noqa: E402
-
-from agent.__main__ import _validate_modes  # noqa: E402
+from agent.__main__ import (  # noqa: E402
+    _resolve_local_results,
+    _resolve_source_commit,
+    _scrub_github_credential_environment,
+    _validate_modes,
+)
 
 
 class TestValidateModes:
@@ -398,13 +524,12 @@ class TestValidateModes:
                 scan=False, publish=False, issues=False, config=populated_agent_config
             )
 
-    def test_scan_no_publish_with_issues_raises(self, populated_agent_config) -> None:
+    def test_scan_no_publish_with_issues_passes(self, populated_agent_config) -> None:
         cfg = replace(
             populated_agent_config,
             github=replace(populated_agent_config.github, scan_token="ghp_x", reports_token="ghp_x"),
         )
-        with pytest.raises(ValueError, match="incoherent"):
-            _validate_modes(scan=True, publish=False, issues=True, config=cfg)
+        _validate_modes(scan=True, publish=False, issues=True, config=cfg)
 
     def test_no_scan_issues_without_destination_raises(
         self, populated_agent_config
@@ -476,6 +601,84 @@ class TestValidateModes:
         )
         _validate_modes(scan=False, publish=False, issues=True, config=cfg)
 
+    def test_local_results_issues_need_no_reports_repo_or_token(
+        self, populated_agent_config
+    ) -> None:
+        cfg = replace(
+            populated_agent_config,
+            github=replace(
+                populated_agent_config.github,
+                scan_token="ghp_scan",
+                reports_token="",
+            ),
+        )
+        _validate_modes(
+            scan=False,
+            publish=False,
+            issues=True,
+            config=cfg,
+            local_results=True,
+        )
+
+    def test_no_scan_publish_without_local_results_raises(
+        self, populated_agent_config
+    ) -> None:
+        cfg = replace(
+            populated_agent_config,
+            github=replace(populated_agent_config.github, reports_token="ghp_reports"),
+        )
+        with pytest.raises(ValueError, match="requires --results-dir"):
+            _validate_modes(scan=False, publish=True, issues=False, config=cfg)
+
+    def test_results_dir_rejects_scan_stage(self, populated_agent_config) -> None:
+        with pytest.raises(ValueError, match="requires --no-scan"):
+            _validate_modes(
+                scan=True,
+                publish=False,
+                issues=False,
+                config=populated_agent_config,
+                local_results=True,
+            )
+
+
+class TestLocalResultsValidation:
+    def test_accepts_standard_results_directory(self, tmp_path: Path) -> None:
+        report = tmp_path / "repo_VULNHUNT_RESULTS_mythos5_1m_2026-08-04-141335"
+        report.mkdir()
+        (report / "README.md").write_text("# Report\n", encoding="utf-8")
+        assert _resolve_local_results(str(report)) == report.resolve()
+
+    def test_rejects_nonstandard_directory_name(self, tmp_path: Path) -> None:
+        report = tmp_path / "arbitrary-output"
+        report.mkdir()
+        (report / "README.md").write_text("# Report\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="basename must match"):
+            _resolve_local_results(str(report))
+
+    def test_source_commit_is_validated_and_normalized(self) -> None:
+        assert _resolve_source_commit("ABCDEF123456") == "abcdef123456"
+        assert _resolve_source_commit(None) == "unknown"
+        with pytest.raises(ValueError, match="hexadecimal"):
+            _resolve_source_commit("../../escape")
+
+    def test_scrubs_github_tokens_before_issue_model_calls(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        names = (
+            "GH_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_TOKEN",
+            "VULNHUNT_GITHUB_SCAN_TOKEN",
+            "VULNHUNT_GITHUB_REPORTS_TOKEN",
+        )
+        for name in names:
+            monkeypatch.setenv(name, f"secret-{name}")
+
+        _scrub_github_credential_environment()
+
+        for name in names:
+            assert name not in os.environ
+
 
 class TestBuildParserNewFlags:
     def test_scan_no_scan_mutually_exclusive(self) -> None:
@@ -495,6 +698,21 @@ class TestBuildParserNewFlags:
     def test_no_scan_parses(self) -> None:
         args = _build_parser().parse_args(["--mode=scan", "url", "--no-scan"])
         assert args.scan is False
+
+    def test_local_delivery_flags_parse(self) -> None:
+        args = _build_parser().parse_args(
+            [
+                "--mode=scan",
+                "url",
+                "--no-scan",
+                "--results-dir",
+                "/tmp/repo_VULNHUNT_RESULTS_mythos5_1m_2026-08-04-141335",
+                "--source-commit",
+                "abcdef123456",
+            ]
+        )
+        assert args.results_dir.endswith("2026-08-04-141335")
+        assert args.source_commit == "abcdef123456"
 
     def test_no_issues_parses(self) -> None:
         args = _build_parser().parse_args(["--mode=scan", "url", "--no-issues"])
@@ -1022,7 +1240,7 @@ def test_main_value_error_from_validate_modes_returns_64(
     populated_agent_config: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """--scan --no-publish --issues triggers _validate_modes ValueError."""
+    """Publishing without a scan or local results is a usage error."""
     import logging as logging_mod
     from dataclasses import replace as _r
 
@@ -1038,10 +1256,18 @@ def test_main_value_error_from_validate_modes_returns_64(
         results_dir=None,
     )
     with caplog.at_level(logging_mod.ERROR):
-        rc = main(["--mode=scan", "https://github.com/o/r", "--no-publish", "--issues"])
-    # Usage error (incoherent flags) = exit 64 (EX_USAGE) per HLD §9, not 2.
+        rc = main(
+            [
+                "--mode=scan",
+                "https://github.com/o/r",
+                "--no-scan",
+                "--publish",
+                "--no-issues",
+            ]
+        )
+    # Usage error = exit 64 (EX_USAGE) per HLD §9, not publish failure 2.
     assert rc == 64
-    assert any("incoherent" in r.getMessage() for r in caplog.records)
+    assert any("requires --results-dir" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -1527,6 +1753,14 @@ class TestRequiredRoles:
             "scan",
             "reports",
         ]
+
+    def test_local_results_issues_do_not_need_reports_role(self) -> None:
+        assert _required_roles(
+            scan=False,
+            publish=False,
+            issues=True,
+            local_results=True,
+        ) == ["scan"]
 
 
 class TestPreflightStandaloneTokens:

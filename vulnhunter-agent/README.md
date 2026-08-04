@@ -19,8 +19,9 @@ container) and wires the results into GitHub.
 - **Publish** *(optional)* — copy that results directory into a separate git repository
   and push a commit, so reports live outside the scanned repo.
 - **Issues** *(optional)* — post one deduplicated GitHub issue per confirmed finding on
-  the target repo, linking back to the published report; emit a "clean scan" receipt when
-  there are no findings.
+  the target repo, linking to the published report when available or the retained
+  workflow artifact when publishing is disabled; emit a "clean scan" receipt when there
+  are no findings.
 - **Verify** *(`--mode=verify`)* — orchestrate the `/vulnhunt-fix-verify` skill over a
   checkout and post a per-finding verdict.
 - **Fix** *(`--mode=fix`)* — stage a VulnHunter report into an isolated run, drive the
@@ -70,11 +71,38 @@ python -m agent --mode=scan https://github.com/your-org/your-service
 python -m agent --mode=scan https://github.com/your-org/your-service --no-publish --no-issues
 ```
 
+An isolated runtime can hand an already-exported report to a trusted delivery process
+without scanning again or downloading a prior report:
+
+```bash
+python -m agent --mode=scan \
+  --model claude-opus-4-8 \
+  --no-scan \
+  --results-dir /reports/service_VULNHUNT_RESULTS_mythos5_1m_2026-08-04-141335 \
+  --source-commit abcdef123456 \
+  --publish \
+  --issues \
+  https://github.com/your-org/your-service
+```
+
+`--results-dir` rejects symlinked or non-standard report directories, and
+`--source-commit` accepts only a hexadecimal Git commit. Publishing and issue submission
+are independent, so either flag may be paired with its `--no-*` counterpart.
+
 Reviewed execution models are `claude-opus-4-7`, `claude-opus-4-8`, and
 `claude-mythos-5`. Mythos is intentionally not a local drop-in override: it has no
 safety classifiers and mandatory 30-day retention without ZDR. Use the hardened
 GitHub Actions profile or `scripts/run_mythos_sandbox.sh`; see
 [Mythos 5 security and deployment](../docs/architecture/mythos-security-profile.md).
+
+The organization workflow enables both central publication and scanned-repository
+issues by default. Manual runs can clear `publish_results` and/or
+`submit_repo_issues`. Scheduled runs can set repository variables
+`VULNHUNT_PUBLISH_RESULTS=false` and/or `VULNHUNT_SUBMIT_REPO_ISSUES=false`. The
+central destination is `VULNHUNT_REPORTS_REPOSITORY` (default: the workflow repository)
+on `VULNHUNT_REPORTS_BRANCH` (default: `main`). Mythos still runs internally with
+`--no-publish --no-issues`; these operations happen only after the gVisor container has
+stopped, in the trusted action process.
 
 Run automated remediation from a local report directory:
 

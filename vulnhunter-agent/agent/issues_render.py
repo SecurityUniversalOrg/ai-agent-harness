@@ -44,6 +44,14 @@ _REPORT_ACCESS_FALLBACK = (
     "The full report lives in a private repository. If the link 404s "
     "for you, request access from your security team."
 )
+_UNPUBLISHED_REPORT_MESSAGE = (
+    "Not centrally published by configuration; download the retained "
+    "GitHub Actions report artifact for this scan."
+)
+_UNPUBLISHED_REPORT_ACCESS_MESSAGE = (
+    "Central report publishing was disabled for this run. The finding details "
+    "above are complete enough to begin triage."
+)
 
 
 def _report_access_message() -> str:
@@ -130,7 +138,12 @@ def render_body(
     # ``## VULN-NNN: <Title>``; GitHub's auto-anchor turns that into a
     # lowercase, punctuation-stripped, space→hyphen fragment.
     anchor = _github_anchor(f"{f.id}: {f.title}") if f.id else ""
-    deep_link = f"{report_url}#{anchor}" if anchor else report_url
+    if report_url:
+        deep_link = f"{report_url}#{anchor}" if anchor else report_url
+        report_access_message = _report_access_message()
+    else:
+        deep_link = _UNPUBLISHED_REPORT_MESSAGE
+        report_access_message = _UNPUBLISHED_REPORT_ACCESS_MESSAGE
     fields = {
         # Attacker-influenced Finding fields — sanitized (CWE-79).
         "TITLE": _sanitize_for_issue_body(f.title or "(untitled)"),
@@ -154,7 +167,7 @@ def render_body(
         # footer markers stay exact.
         "SCAN_DATE": report.scan_date,
         "REPORT_URL": deep_link,
-        "REPORT_ACCESS_MESSAGE": _report_access_message(),
+        "REPORT_ACCESS_MESSAGE": report_access_message,
         "IDEMPOTENCY_KEY": f.vulnfix_key,
         "VULN_ID": f.id,
         "RESULTS_DIR_NAME": report.results_dir_name,

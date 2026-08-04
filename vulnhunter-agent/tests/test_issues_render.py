@@ -129,6 +129,16 @@ class TestRenderBody:
         assert "Full report: https://example.com/r/README.md\n" in body
         assert "Full report: https://example.com/r/README.md#" not in body
 
+    def test_unpublished_report_points_to_workflow_artifact(self) -> None:
+        body = render_body(
+            _finding(),
+            report=_report(),
+            report_url="",
+        )
+        assert "Not centrally published by configuration" in body
+        assert "retained GitHub Actions report artifact" in body
+        assert "Full report: #" not in body
+
     def test_missing_optional_fields_render_placeholders_not_blanks(self) -> None:
         body = render_body(
             _finding(

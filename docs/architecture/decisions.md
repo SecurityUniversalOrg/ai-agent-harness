@@ -312,11 +312,13 @@ the only allowed outbound connection through a separate proxy whose ACL is the e
 gVisor, sandboxing, or egress assertions fail.
 
 **Consequences.** Mythos scans need a dedicated self-hosted/ARC runner scale set and a
-trusted control-plane stage for clone/build/artifact handling. Publishing is a separate
-operation. The design costs more startup time and infrastructure than Opus on a hosted
-runner, but it mechanically removes GitHub tokens, host mounts, target settings, Bash,
-and general network reachability from the least-trusted model boundary. Retention and
-workspace entitlement remain external provider constraints.
+trusted control-plane stage for clone/build/artifact handling. Publishing and target
+issue submission are separate post-sandbox operations, independently configurable and
+enabled by default in the organization workflow. The design costs more startup time and
+infrastructure than Opus on a hosted runner, but it mechanically removes GitHub tokens,
+host mounts, target settings, Bash, and general network reachability from the
+least-trusted model boundary. Retention and workspace entitlement remain external
+provider constraints.
 
 **Evidence.** [`agent/model_policy.py`](../../vulnhunter-agent/agent/model_policy.py),
 [`agent/build_settings.py`](../../vulnhunter-agent/agent/build_settings.py),

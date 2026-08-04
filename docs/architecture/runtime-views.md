@@ -88,8 +88,9 @@ sequenceDiagram
 - Cold-start 429/5xx failures are safe to restart and receive bounded backoff. Once an
   assistant message has appeared, the runner preserves the session and delegates a
   whole-run retry decision to the outer scheduler.
-- Issue creation requires a published report URL. The CLI rejects `scan + no-publish +
-  issues` before doing work.
+- Publishing and issue submission are independent. When publishing is disabled, issue
+  bodies point to the retained workflow artifact instead of constructing an invalid
+  central-report fragment link.
 - Report fields are LLM-extracted, but PoC and exploit-test paths are discovered from
   the filesystem.
 - A scan manifest is schema-validated and atomically committed. Publish failure exit
@@ -377,6 +378,9 @@ sequenceDiagram
     participant A as Mythos agent
     participant P as Egress proxy
     participant AWS as Claude Platform AWS
+    participant R as Central reports repository
+    participant I as Scanned repository issues
+    participant O as Actions artifact
 
     W->>C: Select claude-mythos-5 and acknowledge retention
     C->>D: Build and launch disposable agent and proxy with runsc
@@ -398,13 +402,27 @@ sequenceDiagram
     P->>AWS: CONNECT exact regional endpoint
     AWS-->>A: Stream model response through proxy
     A-->>C: Persist scan report in ephemeral workspace
-    C-->>W: Copy report out and destroy containers and network
+    C->>C: Validate and export one results tree and source commit
+    C->>D: Destroy containers and networks
+    opt Publish results enabled
+        C->>R: Copy commit and push report with reports token
+        R-->>C: Return publication commit
+    end
+    opt Submit repository issues enabled
+        C->>C: Extract and deduplicate findings with no model tools
+        C->>I: Create or update issues with scan token
+    end
+    C->>O: Upload retained report artifact
+    C-->>W: Return delivery status
 ```
 
 The preflight emits sanitized `ISOLATION_PROOF` records to the job log and GitHub step
 summary. It receives no AWS or GitHub credentials. The model container never receives
 either GitHub token. The scan reuses the checkout staged under its configured clone
-directory, loads only installed user settings, and runs with `--no-publish --no-issues`. See the
+directory, loads only installed user settings, and runs with `--no-publish --no-issues`.
+On success, a trusted `--no-scan --results-dir` process performs the independently
+enabled publish and issue stages. Both workflow controls default to enabled; disabling
+both leaves artifact upload as the only delivery route. See the
 [Mythos security profile](mythos-security-profile.md) for the complete control and
 failure matrix.
 

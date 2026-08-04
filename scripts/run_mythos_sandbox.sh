@@ -105,6 +105,9 @@ GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic_auth}" \
 GIT_TERMINAL_PROMPT=0 \
   git clone --depth 1 --no-tags -- "${TARGET_REPOSITORY}" "${checkout_dir}"
 unset basic_auth
+source_commit="$(git -C "${checkout_dir}" rev-parse HEAD)"
+[[ "${source_commit}" =~ ^[0-9a-fA-F]{7,64}$ ]] \
+  || die "Trusted checkout returned an invalid source commit"
 
 echo "Building immutable Mythos runtime images before the restricted container starts"
 docker build \
@@ -335,8 +338,18 @@ for result_dir in "${result_dirs[@]}"; do
   [[ -d "${report_output}/${result_name}" ]] \
     || die "Streamed result export did not create ${result_name}"
 done
-if (( ${#result_dirs[@]} == 0 )); then
-  echo "::warning::The Mythos container produced no VulnHunter results directory"
+if (( ${#result_dirs[@]} == 1 )); then
+  exported_results_dir="${report_output}/${result_dirs[0]##*/}"
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    {
+      echo "results_dir=${exported_results_dir}"
+      echo "source_commit=${source_commit}"
+    } >> "${GITHUB_OUTPUT}"
+  fi
+elif (( scan_rc == 0 )); then
+  die "Successful Mythos scan produced ${#result_dirs[@]} results directories; expected exactly one"
+else
+  echo "::warning::Failed Mythos scan produced ${#result_dirs[@]} results directories; delivery will not run"
 fi
 
 audit_output="${report_output}/audit"
