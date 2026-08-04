@@ -68,7 +68,7 @@ route. The checkout and all model state live on run-scoped tmpfs.
 | Settings isolation | Mythos loads only the installed user skill; target-controlled project/local Claude settings and hooks are not loaded |
 | Credential isolation | GitHub scan token is used only by the control plane; report token is not provided to the Mythos action path; AWS secrets use a mode-0600 Docker env file rather than argv |
 | Container boundary | `runsc`, non-root UID/GID 65532, read-only root, all Linux capabilities dropped, `no-new-privileges`, no devices/mounts/socket, private IPC, PID/file/memory/CPU limits |
-| Mutable storage | `/workspace`, `/tmp`, and `~/.claude` are size-bounded tmpfs with `nodev`, `nosuid`, and `noexec` |
+| Mutable storage | `/workspace`, `/tmp`, `~/.claude`, and `~/.vulnhunter` are size-bounded tmpfs with `nodev`, `nosuid`, and `noexec`; audit paths are absolute and the audit JSONL streams are exported with the report |
 | Network boundary | Agent attaches only to an `--internal` user-defined Docker network; the proxy is dual-homed on that network and a separate run-scoped user-defined egress bridge; direct agent socket egress is tested and must fail |
 | Proxy boundary | Non-root, read-only Squid sidecar accepts CONNECT only to the exact AWS hostname on port 443; all other methods, ports, and destinations are denied |
 | Proxy discovery | Both proxy networks are attached before `runsc` starts, and the trusted launcher injects the attested internal proxy IP into the agent hosts file; the agent does not depend on external or Docker embedded DNS to find its only egress gateway |

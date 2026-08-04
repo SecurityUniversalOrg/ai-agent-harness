@@ -177,6 +177,8 @@ VULNHUNT_SANDBOX_ALLOW_UNSANDBOXED_COMMANDS=false
 VULNHUNT_TELEMETRY_ENABLED=false
 VULNHUNT_MYTHOS_DATA_RETENTION_ACKNOWLEDGED=true
 VULNHUNT_MYTHOS_HTTPS_PROXY=http://${PROXY_ALIAS}:3128
+VULNHUNT_AUDIT_EVENTS_PATH=/home/appuser/.vulnhunter/audit_events.jsonl
+VULNHUNT_AUDIT_FINDINGS_PATH=/home/appuser/.vulnhunter/findings_events.jsonl
 PYTHONUNBUFFERED=1
 EOF
 chmod 0600 "${env_file}"
@@ -201,6 +203,7 @@ docker run --detach \
   --tmpfs /workspace:rw,nosuid,nodev,noexec,size=${MYTHOS_WORKSPACE_LIMIT:-8g},uid=65532,gid=65532,mode=0700 \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=512m,uid=65532,gid=65532,mode=0700 \
   --tmpfs /home/appuser/.claude:rw,nosuid,nodev,noexec,size=512m,uid=65532,gid=65532,mode=0700 \
+  --tmpfs /home/appuser/.vulnhunter:rw,nosuid,nodev,noexec,size=64m,uid=65532,gid=65532,mode=0700 \
   "${agent_image}" >/dev/null
 rm -f -- "${env_file}"
 
@@ -302,6 +305,8 @@ scan_rc=$?
 set -e
 
 report_output="${MYTHOS_OUTPUT_DIR}/${repo_name}"
+[[ ! -L "${MYTHOS_OUTPUT_DIR}" && ! -L "${report_output}" ]] \
+  || die "Refusing to export through a symlinked output directory"
 mkdir -p "${report_output}"
 mapfile -t result_dirs < <(
   docker exec "${agent_container}" find "/workspace/clones/${repo_name}" \
@@ -313,10 +318,38 @@ for result_dir in "${result_dirs[@]}"; do
     || die "Refusing to export unexpected result directory name: ${result_name}"
   docker exec "${agent_container}" test ! -L "${result_dir}" \
     || die "Refusing to export a symlinked result directory"
-  docker cp "${agent_container}:${result_dir}" "${report_output}/"
+  unexpected_entry="$(docker exec "${agent_container}" find "${result_dir}" \
+    -mindepth 1 \( -type l -o \( ! -type f ! -type d \) \) -print -quit)"
+  [[ -z "${unexpected_entry}" ]] \
+    || die "Refusing to export a result tree containing a symlink or special file: ${unexpected_entry}"
+  [[ ! -e "${report_output}/${result_name}" ]] \
+    || die "Refusing to overwrite an existing exported result: ${result_name}"
+
+  # Docker's archive-based `cp` cannot reliably see tmpfs mounted by runsc.
+  # Stream from a process inside the sandbox instead. The source basename is
+  # strictly validated above, special files/symlinks are rejected, hard links
+  # are dereferenced, and host ownership/permissions are never restored.
+  docker exec --user 65532:65532 "${agent_container}" tar \
+      --hard-dereference -C "/workspace/clones/${repo_name}" -cf - -- "${result_name}" \
+    | tar --no-same-owner --no-same-permissions -C "${report_output}" -xf -
+  [[ -d "${report_output}/${result_name}" ]] \
+    || die "Streamed result export did not create ${result_name}"
 done
 if (( ${#result_dirs[@]} == 0 )); then
   echo "::warning::The Mythos container produced no VulnHunter results directory"
+fi
+
+audit_output="${report_output}/audit"
+if docker exec "${agent_container}" test -d /home/appuser/.vulnhunter; then
+  unexpected_audit_entry="$(docker exec "${agent_container}" find /home/appuser/.vulnhunter \
+    -mindepth 1 \( -type l -o \( ! -type f ! -type d \) \) -print -quit)"
+  [[ -z "${unexpected_audit_entry}" ]] \
+    || die "Refusing to export an audit tree containing a symlink or special file: ${unexpected_audit_entry}"
+  [[ ! -e "${audit_output}" ]] || die "Refusing to overwrite existing audit export"
+  mkdir -p "${audit_output}"
+  docker exec --user 65532:65532 "${agent_container}" tar \
+      --hard-dereference -C /home/appuser/.vulnhunter -cf - . \
+    | tar --no-same-owner --no-same-permissions -C "${audit_output}" -xf -
 fi
 echo "Mythos scan reports copied to ${report_output}"
 exit "${scan_rc}"

@@ -143,6 +143,7 @@ docker run --detach \
   --tmpfs /workspace:rw,nosuid,nodev,noexec,size=${MYTHOS_WORKSPACE_LIMIT:-8g},uid=65532,gid=65532,mode=0700 \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=512m,uid=65532,gid=65532,mode=0700 \
   --tmpfs /home/appuser/.claude:rw,nosuid,nodev,noexec,size=512m,uid=65532,gid=65532,mode=0700 \
+  --tmpfs /home/appuser/.vulnhunter:rw,nosuid,nodev,noexec,size=64m,uid=65532,gid=65532,mode=0700 \
   "${agent_image}" >/dev/null
 
 echo "::group::Selected non-secret Docker and gVisor attestations"
@@ -221,8 +222,8 @@ for protected_path in /mythos-root-write-test /etc/mythos-write-test /opt/vulnhu
 done
 
 docker exec --user 65532:65532 "${agent_container}" sh -c \
-  'touch /workspace/.write-proof /tmp/.write-proof /home/appuser/.claude/.write-proof && rm -f /workspace/.write-proof /tmp/.write-proof /home/appuser/.claude/.write-proof'
-proof "ephemeral-write" "allowed only in /workspace, /tmp, and /home/appuser/.claude tmpfs"
+  'touch /workspace/.write-proof /tmp/.write-proof /home/appuser/.claude/.write-proof /home/appuser/.vulnhunter/.write-proof && rm -f /workspace/.write-proof /tmp/.write-proof /home/appuser/.claude/.write-proof /home/appuser/.vulnhunter/.write-proof'
+proof "ephemeral-write" "allowed only in /workspace, /tmp, /home/appuser/.claude, and /home/appuser/.vulnhunter tmpfs"
 
 set +e
 noexec_output="$(docker exec --user 65532:65532 "${agent_container}" sh -c \
