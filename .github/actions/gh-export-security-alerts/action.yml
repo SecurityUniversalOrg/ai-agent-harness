@@ -1,0 +1,133 @@
+name: Export GitHub Security Alerts
+description: Exports secret scanning, Dependabot, and CodeQL/code scanning alerts to JSON.
+
+inputs:
+  token:
+    required: true
+
+  owner:
+    required: true
+
+  repo:
+    required: true
+
+  output-directory:
+    required: false
+    default: security-results
+
+  github-api-url:
+    required: false
+    default: https://api.github.com
+
+outputs:
+  secret-alerts-file:
+    value: ${{ steps.export.outputs.secret-alerts-file }}
+
+  dependabot-alerts-file:
+    value: ${{ steps.export.outputs.dependabot-alerts-file }}
+
+  codeql-alerts-file:
+    value: ${{ steps.export.outputs.codeql-alerts-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Export GitHub security alerts
+      id: export
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        OWNER: ${{ inputs.owner }}
+        REPO: ${{ inputs.repo }}
+        OUT_DIR: ${{ inputs.output-directory }}
+        API_URL: ${{ inputs.github-api-url }}
+      run: |
+        set -euo pipefail
+
+        mkdir -p "$OUT_DIR"
+
+        SECRET_FILE="$OUT_DIR/secret-scanning-alerts.json"
+        DEPENDABOT_FILE="$OUT_DIR/dependabot-alerts.json"
+        CODEQL_FILE="$OUT_DIR/codeql-alerts.json"
+
+        api_get_paginated() {
+          local endpoint="$1"
+          local output_file="$2"
+          local tmp
+          local headers
+          local url
+          local http_code
+          local next_url
+
+          tmp="$(mktemp)"
+          headers="$(mktemp)"
+
+          echo "[]" > "$output_file"
+
+          # Do not add page=. Dependabot alerts reject it.
+          url="${API_URL}${endpoint}?state=open&per_page=100"
+
+          while [ -n "$url" ]; do
+            http_code="$(
+              curl -sS \
+                -D "$headers" \
+                -o "$tmp" \
+                -w "%{http_code}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "$url"
+            )"
+
+            if [ "$http_code" = "404" ] || [ "$http_code" = "403" ]; then
+              jq -n \
+                --arg endpoint "$endpoint" \
+                --arg status "$http_code" \
+                --arg message "Endpoint unavailable, feature disabled, or token lacks permission." \
+                '{ unavailable: true, endpoint: $endpoint, http_status: $status, message: $message, alerts: [] }' \
+                > "$output_file"
+              return 0
+            fi
+
+            if [ "$http_code" -lt 200 ] || [ "$http_code" -gt 299 ]; then
+              echo "ERROR: API call failed for $endpoint with HTTP $http_code"
+              cat "$tmp"
+              exit 1
+            fi
+
+            jq -s '.[0] + .[1]' "$output_file" "$tmp" > "${output_file}.tmp"
+            mv "${output_file}.tmp" "$output_file"
+
+            # Extract rel="next" URL from Link header, if present.
+            next_url="$(
+              awk -F'[<>]' '
+                BEGIN { IGNORECASE=1 }
+                /^link:/ {
+                  n=split($0, parts, ",")
+                  for (i=1; i<=n; i++) {
+                    if (parts[i] ~ /rel="next"/) {
+                      match(parts[i], /<[^>]+>/)
+                      if (RSTART > 0) {
+                        print substr(parts[i], RSTART + 1, RLENGTH - 2)
+                      }
+                    }
+                  }
+                }
+              ' "$headers" | tr -d '\r' | head -n 1
+            )"
+
+            url="$next_url"
+          done
+        }
+
+        api_get_paginated "/repos/${OWNER}/${REPO}/secret-scanning/alerts" "$SECRET_FILE"
+        api_get_paginated "/repos/${OWNER}/${REPO}/dependabot/alerts" "$DEPENDABOT_FILE"
+        api_get_paginated "/repos/${OWNER}/${REPO}/code-scanning/alerts" "$CODEQL_FILE"
+
+        jq . "$SECRET_FILE" >/dev/null
+        jq . "$DEPENDABOT_FILE" >/dev/null
+        jq . "$CODEQL_FILE" >/dev/null
+
+        echo "secret-alerts-file=$SECRET_FILE" >> "$GITHUB_OUTPUT"
+        echo "dependabot-alerts-file=$DEPENDABOT_FILE" >> "$GITHUB_OUTPUT"
+        echo "codeql-alerts-file=$CODEQL_FILE" >> "$GITHUB_OUTPUT"

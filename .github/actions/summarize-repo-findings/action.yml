@@ -1,0 +1,88 @@
+name: Summarize Repository Findings
+description: Creates a normalized report package for one scanned repository.
+
+inputs:
+  owner:
+    required: true
+
+  repo:
+    required: true
+
+  default-branch:
+    required: true
+
+  commit-sha:
+    required: true
+
+  security-results-directory:
+    required: true
+
+  ai-triage-file:
+    required: true
+
+  sarif-file:
+    required: true
+
+  mitigation-report-file:
+    required: true
+
+  issue-url:
+    required: false
+    default: ""
+
+  output-directory:
+    required: false
+    default: final-report
+
+outputs:
+  artifact-name:
+    value: ${{ steps.summary.outputs.artifact-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Create normalized report package
+      id: summary
+      shell: bash
+      env:
+        OWNER: ${{ inputs.owner }}
+        REPO: ${{ inputs.repo }}
+        DEFAULT_BRANCH: ${{ inputs.default-branch }}
+        COMMIT_SHA: ${{ inputs.commit-sha }}
+        SECURITY_RESULTS_DIR: ${{ inputs.security-results-directory }}
+        TRIAGE_FILE: ${{ inputs.ai-triage-file }}
+        SARIF_FILE: ${{ inputs.sarif-file }}
+        MITIGATION_FILE: ${{ inputs.mitigation-report-file }}
+        ISSUE_URL: ${{ inputs.issue-url }}
+        OUT_DIR: ${{ inputs.output-directory }}
+      run: |
+        set -euo pipefail
+
+        mkdir -p "$OUT_DIR/security-results"
+
+        cp "$SECURITY_RESULTS_DIR"/*.json "$OUT_DIR/security-results/"
+        cp "$TRIAGE_FILE" "$OUT_DIR/ai-triage.json"
+        cp "$SARIF_FILE" "$OUT_DIR/copilot-new-findings.sarif"
+        cp "$MITIGATION_FILE" "$OUT_DIR/mitigation-report.md"
+
+        jq -n \
+          --arg owner "$OWNER" \
+          --arg repo "$REPO" \
+          --arg default_branch "$DEFAULT_BRANCH" \
+          --arg commit_sha "$COMMIT_SHA" \
+          --arg issue_url "$ISSUE_URL" \
+          --slurpfile triage "$TRIAGE_FILE" \
+          '{
+            owner: $owner,
+            repo: $repo,
+            full_name: ($owner + "/" + $repo),
+            default_branch: $default_branch,
+            commit_sha: $commit_sha,
+            issue_url: $issue_url,
+            triage: $triage[0]
+          }' > "$OUT_DIR/report-summary.json"
+
+        ARTIFACT_NAME="security-report-${OWNER}-${REPO}"
+        ARTIFACT_NAME="$(echo "$ARTIFACT_NAME" | tr '/[:upper:]' '-[:lower:]' | tr -cd 'a-z0-9._-')"
+
+        echo "artifact-name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"

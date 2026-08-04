@@ -1,0 +1,78 @@
+name: Build Repository Matrix
+description: Builds a GitHub Actions matrix from a CSV file of repositories.
+
+inputs:
+  repos-csv:
+    description: Path to repository CSV file.
+    required: true
+
+outputs:
+  matrix:
+    description: JSON matrix include array.
+    value: ${{ steps.build.outputs.matrix }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build matrix
+      id: build
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        CSV="${{ inputs.repos-csv }}"
+
+        if [ ! -f "$CSV" ]; then
+          echo "ERROR: Repository CSV not found: $CSV"
+          exit 1
+        fi
+
+        python3 - "$CSV" <<'PY' > matrix.json
+        import csv
+        import json
+        import sys
+
+        csv_path = sys.argv[1]
+        required = [
+            "owner",
+            "repo",
+            "default_branch",
+            "internet_facing",
+            "cloud_platform",
+            "business_owner",
+            "development_exec",
+        ]
+
+        rows = []
+
+        with open(csv_path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            missing = [h for h in required if h not in (reader.fieldnames or [])]
+            if missing:
+                raise SystemExit(f"Missing required CSV columns: {', '.join(missing)}")
+
+            for row in reader:
+                if not row.get("owner") or not row.get("repo"):
+                    continue
+
+                rows.append({
+                    "owner": row["owner"].strip(),
+                    "repo": row["repo"].strip(),
+                    "default_branch": row.get("default_branch", "main").strip() or "main",
+                    "internet_facing": row.get("internet_facing", "false").strip() or "false",
+                    "cloud_platform": row.get("cloud_platform", "unknown").strip() or "unknown",
+                    "business_owner": row.get("business_owner", "unknown").strip() or "unknown",
+                    "development_exec": row.get("development_exec", "unknown").strip() or "unknown",
+                })
+
+        if not rows:
+            raise SystemExit("No repositories found in CSV.")
+
+        print(json.dumps(rows, separators=(",", ":")))
+        PY
+
+        MATRIX="$(cat matrix.json)"
+        echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+        echo "Repository matrix:"
+        jq . matrix.json

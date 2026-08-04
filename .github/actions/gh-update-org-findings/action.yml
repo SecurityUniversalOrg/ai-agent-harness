@@ -1,0 +1,217 @@
+name: Update Org Findings
+description: Updates reports directory and org_findings.csv from downloaded repo report artifacts.
+
+inputs:
+  central-repo-path:
+    required: true
+
+  downloaded-reports-path:
+    required: true
+
+  org-findings-file:
+    required: false
+    default: org_findings.csv
+
+  reports-directory:
+    required: false
+    default: reports
+
+runs:
+  using: composite
+  steps:
+    - name: Update central reporting files
+      shell: bash
+      env:
+        CENTRAL_REPO: ${{ inputs.central-repo-path }}
+        DOWNLOADED_REPORTS: ${{ inputs.downloaded-reports-path }}
+        ORG_FINDINGS_FILE: ${{ inputs.org-findings-file }}
+        REPORTS_DIR: ${{ inputs.reports-directory }}
+      run: |
+        set -euo pipefail
+
+        cd "$CENTRAL_REPO"
+
+        mkdir -p "$REPORTS_DIR"
+
+        python3 <<'PY'
+        import csv
+        import json
+        import os
+        import shutil
+        import tempfile
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        central_repo = Path(os.environ["CENTRAL_REPO"]).resolve()
+        downloaded_reports_input = os.environ["DOWNLOADED_REPORTS"]
+        org_findings_file = Path(os.environ["ORG_FINDINGS_FILE"])
+        reports_dir = Path(os.environ["REPORTS_DIR"])
+
+        # We are already cd'd into CENTRAL_REPO from bash, but resolve defensively.
+        cwd = Path.cwd()
+
+        # Support both:
+        #   downloaded-reports-path: downloaded-reports
+        #   downloaded-reports-path: ../downloaded-reports
+        #   downloaded-reports-path: /absolute/path
+        candidate = Path(downloaded_reports_input)
+
+        if candidate.is_absolute():
+            downloaded_reports = candidate
+        elif (cwd / candidate).exists():
+            downloaded_reports = (cwd / candidate).resolve()
+        elif (cwd.parent / candidate).exists():
+            downloaded_reports = (cwd.parent / candidate).resolve()
+        else:
+            downloaded_reports = (cwd / candidate).resolve()
+
+        header = [
+            "owner",
+            "repo",
+            "default_branch",
+            "commit_sha",
+            "tool",
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "unknown",
+            "total",
+            "issue_url",
+            "updated_at",
+        ]
+
+        key_fields = ["owner", "repo", "tool"]
+
+        updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        existing_rows = {}
+
+        if org_findings_file.exists():
+            with org_findings_file.open("r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+
+                if reader.fieldnames:
+                    # Preserve any extra columns that may have been added later.
+                    for field in reader.fieldnames:
+                        if field not in header:
+                            header.append(field)
+
+                for row in reader:
+                    key = tuple((row.get(field) or "").strip() for field in key_fields)
+
+                    # Skip malformed rows without a repo/tool identity.
+                    if not all(key):
+                        continue
+
+                    existing_rows[key] = row
+
+        summary_files = sorted(downloaded_reports.rglob("report-summary.json"))
+
+        updated_count = 0
+        inserted_count = 0
+        copied_report_count = 0
+
+        for summary_file in summary_files:
+            with summary_file.open("r", encoding="utf-8") as f:
+                summary = json.load(f)
+
+            owner = str(summary.get("owner") or "").strip()
+            repo = str(summary.get("repo") or "").strip()
+            default_branch = str(summary.get("default_branch") or "").strip()
+            commit_sha = str(summary.get("commit_sha") or "").strip()
+            issue_url = str(summary.get("issue_url") or "").strip()
+
+            if not owner or not repo:
+                print(f"Skipping {summary_file}: missing owner or repo")
+                continue
+
+            if not commit_sha:
+                commit_sha = "unknown-commit"
+
+            src_dir = summary_file.parent
+            dest_dir = reports_dir / owner / repo / commit_sha
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+            for item in src_dir.iterdir():
+                dest_item = dest_dir / item.name
+
+                if item.is_dir():
+                    if dest_item.exists():
+                        shutil.rmtree(dest_item)
+                    shutil.copytree(item, dest_item)
+                else:
+                    shutil.copy2(item, dest_item)
+
+            copied_report_count += 1
+
+            finding_counts = (
+                summary
+                .get("triage", {})
+                .get("finding_counts", {})
+            )
+
+            if not isinstance(finding_counts, dict):
+                print(f"Skipping findings for {summary_file}: triage.finding_counts is missing or invalid")
+                continue
+
+            for tool, counts in finding_counts.items():
+                if not isinstance(counts, dict):
+                    counts = {}
+
+                key = (owner, repo, str(tool))
+
+                new_row = {
+                    "owner": owner,
+                    "repo": repo,
+                    "default_branch": default_branch,
+                    "commit_sha": commit_sha,
+                    "tool": str(tool),
+                    "critical": counts.get("critical", 0) or 0,
+                    "high": counts.get("high", 0) or 0,
+                    "medium": counts.get("medium", 0) or 0,
+                    "low": counts.get("low", 0) or 0,
+                    "unknown": counts.get("unknown", 0) or 0,
+                    "total": counts.get("total", 0) or 0,
+                    "issue_url": issue_url,
+                    "updated_at": updated_at,
+                }
+
+                # Preserve any non-standard/extra columns already present in the CSV.
+                if key in existing_rows:
+                    merged_row = existing_rows[key].copy()
+                    merged_row.update(new_row)
+                    existing_rows[key] = merged_row
+                    updated_count += 1
+                else:
+                    existing_rows[key] = new_row
+                    inserted_count += 1
+
+        sorted_rows = [
+            existing_rows[key]
+            for key in sorted(existing_rows.keys(), key=lambda x: (x[0].lower(), x[1].lower(), x[2].lower()))
+        ]
+
+        fd, tmp_name = tempfile.mkstemp(prefix="org_findings_", suffix=".csv", dir=str(cwd))
+        os.close(fd)
+
+        tmp_path = Path(tmp_name)
+
+        with tmp_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+            writer.writeheader()
+
+            for row in sorted_rows:
+                normalized_row = {field: row.get(field, "") for field in header}
+                writer.writerow(normalized_row)
+
+        tmp_path.replace(org_findings_file)
+
+        print(f"Updated {org_findings_file}")
+        print(f"Updated {reports_dir}/")
+        print(f"Report summaries processed: {len(summary_files)}")
+        print(f"Report directories copied: {copied_report_count}")
+        print(f"Rows updated: {updated_count}")
+        print(f"Rows inserted: {inserted_count}")
+        print(f"Total rows retained: {len(sorted_rows)}")
+        PY

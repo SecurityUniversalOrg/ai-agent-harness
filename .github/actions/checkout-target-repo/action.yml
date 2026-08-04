@@ -1,0 +1,53 @@
+name: Checkout Target Repository
+description: Checks out the scanned repository and returns commit metadata.
+
+inputs:
+  token:
+    description: Token with read access to target repository contents.
+    required: true
+
+  owner:
+    required: true
+
+  repo:
+    required: true
+
+  ref:
+    required: true
+
+  path:
+    required: false
+    default: scanned-source
+
+  github-web-url:
+    required: false
+    default: https://github.com
+
+outputs:
+  commit-sha:
+    description: Checked-out commit SHA.
+    value: ${{ steps.meta.outputs.commit-sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout scanned repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.owner }}/${{ inputs.repo }}
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.token }}
+        path: ${{ inputs.path }}
+        fetch-depth: 1
+
+    - name: Capture repository metadata
+      id: meta
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+
+        COMMIT_SHA="$(git rev-parse HEAD)"
+        echo "commit-sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+
+        echo "Checked out ${{ inputs.owner }}/${{ inputs.repo }}@${COMMIT_SHA}"

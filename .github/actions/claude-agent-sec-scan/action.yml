@@ -1,0 +1,103 @@
+name: Claude Agent Security Scan
+description: Runs VulnHunter using Claude Platform on AWS and scoped GitHub credentials
+author: Your Organization
+
+inputs:
+  aws-workspace-id:
+    description: Claude Platform on AWS workspace ID
+    required: true
+
+  aws-api-key:
+    description: Claude Platform on AWS workspace API key
+    required: true
+
+  scan-token:
+    description: GitHub token used to clone target repositories and manage findings
+    required: true
+
+  reports-token:
+    description: GitHub token used to read and publish VulnHunter reports
+    required: true
+
+  repository-url:
+    description: GitHub repository URL to scan
+    required: true
+
+  python-version:
+    description: Python version used to execute the agent
+    required: false
+    default: "3.12"
+
+  working-directory:
+    description: Directory containing the Python agent module
+    required: false
+    default: "./vulnhunter-agent"
+
+runs:
+  using: composite
+
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Validate configuration
+      shell: bash
+      env:
+        AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
+        AWS_API_KEY: ${{ inputs.aws-api-key }}
+        SCAN_TOKEN: ${{ inputs.scan-token }}
+        REPORTS_TOKEN: ${{ inputs.reports-token }}
+        TARGET_REPOSITORY: ${{ inputs.repository-url }}
+      run: |
+        set -euo pipefail
+
+        declare -A required_values=(
+          [aws-workspace-id]="${AWS_WORKSPACE_ID}"
+          [aws-api-key]="${AWS_API_KEY}"
+          [scan-token]="${SCAN_TOKEN}"
+          [reports-token]="${REPORTS_TOKEN}"
+        )
+
+        for input_name in "${!required_values[@]}"; do
+          value="${required_values[$input_name]}"
+          if [[ -z "${value}" ]]; then
+            echo "::error::The ${input_name} input is required."
+            exit 1
+          fi
+          echo "::add-mask::${value}"
+        done
+
+        if [[ -z "${TARGET_REPOSITORY}" ]]; then
+          echo "::error::The repository-url input is required."
+          exit 1
+        fi
+
+
+    - name: Run Claude Platform on AWS agent scan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        # These environment overlays take precedence over agent/config.toml.
+        # Keep secrets process-scoped rather than writing them to the checkout.
+        VULNHUNT_ANTHROPIC_AUTH_MODE: anthropic_aws
+        VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
+        VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
+        VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.scan-token }}
+        VULNHUNT_GITHUB_REPORTS_TOKEN: ${{ inputs.reports-token }}
+        TARGET_REPOSITORY: ${{ inputs.repository-url }}
+        PYTHONUNBUFFERED: "1"
+      run: |
+        set -euo pipefail
+
+        echo "Setting up Environment via .venv"
+        source .venv/bin/activate
+
+        python3 -m pip install -e ".[dev]"
+
+        echo "Scanning repository: ${TARGET_REPOSITORY}"
+        python3 -m agent \
+          --mode=scan \
+          --config agent/config.toml \
+          "${TARGET_REPOSITORY}"
