@@ -86,3 +86,30 @@ docker() {
       ;;
   esac
 }
+
+# Resolve a fixed allowlisted hostname in the trusted host control plane. The
+# proxy receives these addresses through /etc/hosts and therefore does not
+# depend on container DNS for the allowlisted route. Only canonical IPv4 output
+# is accepted.
+mythos_resolve_ipv4() {
+  local hostname="$1" address octet valid
+  local -a octets
+
+  if ! command -v getent >/dev/null 2>&1; then
+    echo "::error::getent is required on the gvisor runner for trusted endpoint resolution" >&2
+    return 1
+  fi
+
+  while IFS= read -r address; do
+    [[ "${address}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || continue
+    valid=true
+    IFS=. read -r -a octets <<<"${address}"
+    for octet in "${octets[@]}"; do
+      if (( 10#${octet} > 255 )); then
+        valid=false
+        break
+      fi
+    done
+    [[ "${valid}" == "true" ]] && printf '%s\n' "${address}"
+  done < <(getent ahostsv4 "${hostname}" | awk '{print $1}' | sort -u)
+}

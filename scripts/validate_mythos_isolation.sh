@@ -55,6 +55,11 @@ proxy_image="vulnhunt-mythos-proof-proxy:${run_key}"
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
+  if (( rc != 0 )); then
+    echo "::group::Squid diagnostics captured before failed-canary cleanup" >&2
+    docker logs "${proxy_container}" 2>&1 | tail -n 50 >&2 || true
+    echo "::endgroup::" >&2
+  fi
   docker rm -f "${agent_container}" >/dev/null 2>&1 || true
   docker rm -f "${proxy_container}" >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || true
@@ -83,6 +88,15 @@ network_internal="$(docker network inspect --format '{{.Internal}}' "${network}"
 egress_network_internal="$(docker network inspect --format '{{.Internal}}' "${egress_network}")"
 [[ "${egress_network_internal}" == "false" ]] || die "Proxy egress network is unexpectedly internal"
 
+mapfile -t allowed_endpoint_ips < <(mythos_resolve_ipv4 "${ALLOWED_HOST}")
+(( ${#allowed_endpoint_ips[@]} > 0 )) \
+  || die "Trusted control plane could not resolve ${ALLOWED_HOST} to a validated IPv4 address"
+endpoint_host_args=()
+for endpoint_ip in "${allowed_endpoint_ips[@]}"; do
+  endpoint_host_args+=(--add-host "${ALLOWED_HOST}:${endpoint_ip}")
+done
+proof "aws-endpoint-addresses" "${ALLOWED_HOST}=${allowed_endpoint_ips[*]} (trusted host resolution)"
+
 # The proxy alone receives an ordinary bridge interface. Its second interface
 # is the isolated agent network, and Squid denies everything except one CONNECT
 # destination. It also runs in gVisor and contains no application credentials.
@@ -98,6 +112,7 @@ docker run --detach \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
   --network "name=${egress_network},gw-priority=1" \
   --network "name=${network},alias=${PROXY_ALIAS}" \
+  "${endpoint_host_args[@]}" \
   "${proxy_image}" >/dev/null
 
 # Attach the complete proxy topology before gVisor starts. Resolve the proxy's
@@ -228,6 +243,7 @@ echo "::group::Network-denial canaries"
 docker exec --interactive --env EXPECTED_PROXY_IP="${proxy_internal_ip}" "${agent_container}" python - <<'PY'
 import os
 import socket
+import ssl
 import time
 
 
@@ -252,6 +268,24 @@ def proxy_status(payload: bytes) -> bytes:
             last_error = exc
             time.sleep(0.5)
     raise last_error  # type: ignore[misc]
+
+
+def verified_tls_handshake(host: str) -> str:
+    with socket.create_connection((proxy_ip, 3128), 5) as sock:
+        request = f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n"
+        sock.sendall(request.encode("ascii"))
+        response = b""
+        while b"\r\n\r\n" not in response and len(response) < 4096:
+            chunk = sock.recv(512)
+            if not chunk:
+                break
+            response += chunk
+        status = response.split(b"\r\n", 1)[0]
+        if b" 200 " not in status:
+            raise SystemExit(f"TLS CONNECT failed before handshake: {status!r}")
+        context = ssl.create_default_context()
+        with context.wrap_socket(sock, server_hostname=host) as tls_sock:
+            return tls_sock.version()
 
 
 expected_proxy_ip = os.environ["EXPECTED_PROXY_IP"]
@@ -299,6 +333,11 @@ if b" 200 " not in allowed:
 print(
     "ISOLATION_PROOF allowlisted-aws-endpoint      "
     f"ALLOWED CONNECT only ({allowed.decode('ascii', 'replace')})"
+)
+tls_version = verified_tls_handshake("aws-external-anthropic.us-east-1.api.aws")
+print(
+    "ISOLATION_PROOF allowlisted-aws-tls           "
+    f"VERIFIED hostname and CA chain ({tls_version})"
 )
 PY
 echo "::endgroup::"

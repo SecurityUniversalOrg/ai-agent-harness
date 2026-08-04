@@ -6,6 +6,7 @@ set -euo pipefail
 
 readonly MYTHOS_MODEL="claude-mythos-5"
 readonly MYTHOS_REGION="us-east-1"
+readonly MYTHOS_INFERENCE_HOST="aws-external-anthropic.us-east-1.api.aws"
 readonly PROXY_ALIAS="mythos-egress"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
@@ -79,6 +80,11 @@ env_file="${control_dir}/agent.env"
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
+  if (( rc != 0 )); then
+    echo "::group::Squid diagnostics captured before failed-scan cleanup" >&2
+    docker logs "${proxy_container}" 2>&1 | tail -n 50 >&2 || true
+    echo "::endgroup::" >&2
+  fi
   docker rm -f "${agent_container}" >/dev/null 2>&1 || true
   docker rm -f "${proxy_container}" >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || true
@@ -117,6 +123,14 @@ docker network create --internal "${network}" >/dev/null
 [[ "$(docker network inspect --format '{{.Internal}}' "${network}")" == "true" ]] \
   || die "Agent network is not internal"
 
+mapfile -t allowed_endpoint_ips < <(mythos_resolve_ipv4 "${MYTHOS_INFERENCE_HOST}")
+(( ${#allowed_endpoint_ips[@]} > 0 )) \
+  || die "Trusted control plane could not resolve ${MYTHOS_INFERENCE_HOST} to a validated IPv4 address"
+endpoint_host_args=()
+for endpoint_ip in "${allowed_endpoint_ips[@]}"; do
+  endpoint_host_args+=(--add-host "${MYTHOS_INFERENCE_HOST}:${endpoint_ip}")
+done
+
 # The proxy is not exposed on the host. It has ordinary outbound networking,
 # then joins the agent's internal network under one fixed alias. Its Squid ACL
 # accepts only CONNECT aws-external-anthropic.us-east-1.api.aws:443.
@@ -132,6 +146,7 @@ docker run --detach \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
   --network "name=${egress_network},gw-priority=1" \
   --network "name=${network},alias=${PROXY_ALIAS}" \
+  "${endpoint_host_args[@]}" \
   "${proxy_image}" >/dev/null
 
 proxy_internal_ip="$(docker inspect --format \
