@@ -71,6 +71,7 @@ route. The checkout and all model state live on run-scoped tmpfs.
 | Mutable storage | `/workspace`, `/tmp`, and `~/.claude` are size-bounded tmpfs with `nodev`, `nosuid`, and `noexec` |
 | Network boundary | Agent attaches only to an `--internal` Docker network; direct socket egress is tested and must fail |
 | Proxy boundary | Non-root, read-only Squid sidecar accepts CONNECT only to the exact AWS hostname on port 443; all other methods, ports, and destinations are denied |
+| Proxy discovery | Both proxy networks are attached before `runsc` starts, and the trusted launcher injects the attested internal proxy IP into the agent hosts file; the agent does not depend on external or Docker embedded DNS to find its only egress gateway |
 | Startup attestation | Launcher checks the runtime exists, then verifies Docker reports `Runtime=runsc`, the intended network, and a read-only root before setting `VULNHUNT_MYTHOS_HARDENED_RUNTIME=1` |
 | Auditable preflight | The composite action first launches a credential-free disposable canary under the same gVisor, filesystem, capability, namespace, and egress constraints; it prints sanitized `ISOLATION_PROOF` records and fails unless direct HTTP/HTTPS and proxied `example.com` access are denied |
 | Egress canaries | Before inference, direct `1.1.1.1:443` must fail, `CONNECT example.com:443` must return 403, and the exact AWS CONNECT must return 200 |

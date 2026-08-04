@@ -123,9 +123,15 @@ docker run --detach \
   --memory 256m \
   --cpus 0.5 \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
-  --network bridge \
+  --network "name=bridge,gw-priority=1" \
+  --network "name=${network},alias=${PROXY_ALIAS}" \
   "${proxy_image}" >/dev/null
-docker network connect --alias "${PROXY_ALIAS}" "${network}" "${proxy_container}"
+
+proxy_internal_ip="$(docker inspect --format \
+  "{{with index .NetworkSettings.Networks \"${network}\"}}{{.IPAddress}}{{end}}" \
+  "${proxy_container}")"
+[[ "${proxy_internal_ip}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] \
+  || die "Could not attest the proxy's internal IPv4 address: ${proxy_internal_ip}"
 
 umask 077
 cat >"${env_file}" <<EOF
@@ -159,6 +165,7 @@ docker run --detach \
   --name "${agent_container}" \
   --runtime "${runtime}" \
   --network "${network}" \
+  --add-host "${PROXY_ALIAS}:${proxy_internal_ip}" \
   --env-file "${env_file}" \
   --read-only \
   --cap-drop ALL \
@@ -185,6 +192,8 @@ proxy_privileged="$(docker inspect --format '{{.HostConfig.Privileged}}' "${prox
 [[ "${proxy_privileged}" == "false" ]] || die "Proxy container is privileged"
 proxy_mount_count="$(docker inspect --format '{{len .Mounts}}' "${proxy_container}")"
 [[ "${proxy_mount_count}" == "0" ]] || die "Proxy unexpectedly has host/volume mounts"
+proxy_network_count="$(docker inspect --format '{{len .NetworkSettings.Networks}}' "${proxy_container}")"
+[[ "${proxy_network_count}" == "2" ]] || die "Proxy does not have exactly two network interfaces"
 proxy_cap_drop="$(docker inspect --format '{{json .HostConfig.CapDrop}}' "${proxy_container}")"
 [[ "${proxy_cap_drop}" == *'ALL'* ]] || die "Proxy did not drop all Linux capabilities"
 proxy_security_opt="$(docker inspect --format '{{json .HostConfig.SecurityOpt}}' "${proxy_container}")"
@@ -224,6 +233,10 @@ docker exec --user 65532:65532 "${agent_container}" sh -c \
 
 # Mechanical egress assertions. Direct Internet routing must fail, a denied
 # CONNECT must return 403, and the exact Mythos CONNECT must return 200.
+resolved_proxy_ip="$(docker exec "${agent_container}" python -c \
+  'import socket; print(socket.gethostbyname("mythos-egress"))')"
+[[ "${resolved_proxy_ip}" == "${proxy_internal_ip}" ]] \
+  || die "Agent proxy host mapping failed: resolved=${resolved_proxy_ip} expected=${proxy_internal_ip}"
 if docker exec "${agent_container}" python -c \
   'import socket; s=socket.create_connection(("1.1.1.1",443),2); s.close()' \
   >/dev/null 2>&1; then

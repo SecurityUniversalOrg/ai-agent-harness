@@ -91,9 +91,18 @@ docker run --detach \
   --memory 256m \
   --cpus 0.5 \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
-  --network bridge \
+  --network "name=bridge,gw-priority=1" \
+  --network "name=${network},alias=${PROXY_ALIAS}" \
   "${proxy_image}" >/dev/null
-docker network connect --alias "${PROXY_ALIAS}" "${network}" "${proxy_container}"
+
+# Attach the complete proxy topology before gVisor starts. Resolve the proxy's
+# internal address in the trusted control plane and add a fixed hosts entry to
+# the agent, avoiding any dependency on embedded-DNS timing.
+proxy_internal_ip="$(docker inspect --format \
+  "{{with index .NetworkSettings.Networks \"${network}\"}}{{.IPAddress}}{{end}}" \
+  "${proxy_container}")"
+[[ "${proxy_internal_ip}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] \
+  || die "Could not attest the proxy's internal IPv4 address: ${proxy_internal_ip}"
 
 # This credential-free canary uses the same isolation switches as the real
 # Mythos agent. Only deliberately ephemeral tmpfs paths are writable.
@@ -101,6 +110,7 @@ docker run --detach \
   --name "${agent_container}" \
   --runtime "${runtime}" \
   --network "${network}" \
+  --add-host "${PROXY_ALIAS}:${proxy_internal_ip}" \
   --read-only \
   --cap-drop ALL \
   --security-opt no-new-privileges=true \
@@ -170,6 +180,7 @@ esac
 proof "agent-runtime" "${actual_runtime}; guest kernel ${guest_kernel}"
 proof "proxy-runtime" "${proxy_runtime}; read-only=${proxy_readonly}; privileged=${proxy_privileged}"
 proof "proxy-boundaries" "interfaces=${proxy_network_count}; mounts=${proxy_mount_count}; drop=${proxy_cap_drop}; security-opt=${proxy_security_opt}"
+proof "proxy-internal-address" "${PROXY_ALIAS}=${proxy_internal_ip}; injected into agent hosts file"
 proof "identity" "uid:gid=${actual_user}; privileged=${actual_privileged}"
 proof "root-filesystem" "read-only=${actual_readonly}; host/volume mounts=${mount_count}; devices=${device_count}"
 proof "namespaces" "pid=private; ipc=${actual_ipc_mode}; network=${actual_network}; interfaces=${agent_network_count}"
@@ -208,7 +219,8 @@ proof "docker-socket" "absent"
 echo "::endgroup::"
 
 echo "::group::Network-denial canaries"
-docker exec --interactive "${agent_container}" python - <<'PY'
+docker exec --interactive --env EXPECTED_PROXY_IP="${proxy_internal_ip}" "${agent_container}" python - <<'PY'
+import os
 import socket
 import time
 
@@ -227,7 +239,7 @@ def proxy_status(payload: bytes) -> bytes:
     last_error = None
     for _ in range(30):
         try:
-            with socket.create_connection(("mythos-egress", 3128), 5) as sock:
+            with socket.create_connection((proxy_ip, 3128), 5) as sock:
                 sock.sendall(payload)
                 return sock.recv(512).split(b"\r\n", 1)[0]
         except OSError as exc:
@@ -235,6 +247,14 @@ def proxy_status(payload: bytes) -> bytes:
             time.sleep(0.5)
     raise last_error  # type: ignore[misc]
 
+
+expected_proxy_ip = os.environ["EXPECTED_PROXY_IP"]
+proxy_ip = socket.gethostbyname("mythos-egress")
+if proxy_ip != expected_proxy_ip:
+    raise SystemExit(
+        f"proxy host mapping mismatch: resolved={proxy_ip} expected={expected_proxy_ip}"
+    )
+print(f"ISOLATION_PROOF proxy-host-resolution          mythos-egress={proxy_ip}")
 
 direct_must_fail("direct-http-example.com", "example.com", 80)
 direct_must_fail("direct-https-example.com", "example.com", 443)
