@@ -46,6 +46,7 @@ proof "docker-runtime" "runsc registered; no network=host, host-uds=open, or dir
 run_key="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${RANDOM}"
 run_key="${run_key//[^A-Za-z0-9_.-]/-}"
 network="vulnhunt-mythos-proof-${run_key}"
+egress_network="vulnhunt-mythos-proof-egress-${run_key}"
 proxy_container="vulnhunt-mythos-proof-proxy-${run_key}"
 agent_container="vulnhunt-mythos-proof-agent-${run_key}"
 agent_image="vulnhunt-mythos-proof-agent:${run_key}"
@@ -57,6 +58,7 @@ cleanup() {
   docker rm -f "${agent_container}" >/dev/null 2>&1 || true
   docker rm -f "${proxy_container}" >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || true
+  docker network rm "${egress_network}" >/dev/null 2>&1 || true
   docker image rm -f "${agent_image}" >/dev/null 2>&1 || true
   docker image rm -f "${proxy_image}" >/dev/null 2>&1 || true
   exit "${rc}"
@@ -74,9 +76,12 @@ docker build \
   "${repo_root}"
 echo "::endgroup::"
 
+docker network create "${egress_network}" >/dev/null
 docker network create --internal "${network}" >/dev/null
 network_internal="$(docker network inspect --format '{{.Internal}}' "${network}")"
 [[ "${network_internal}" == "true" ]] || die "Canary network is not internal"
+egress_network_internal="$(docker network inspect --format '{{.Internal}}' "${egress_network}")"
+[[ "${egress_network_internal}" == "false" ]] || die "Proxy egress network is unexpectedly internal"
 
 # The proxy alone receives an ordinary bridge interface. Its second interface
 # is the isolated agent network, and Squid denies everything except one CONNECT
@@ -91,7 +96,7 @@ docker run --detach \
   --memory 256m \
   --cpus 0.5 \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
-  --network "name=bridge,gw-priority=1" \
+  --network "name=${egress_network},gw-priority=1" \
   --network "name=${network},alias=${PROXY_ALIAS}" \
   "${proxy_image}" >/dev/null
 
@@ -180,6 +185,7 @@ esac
 proof "agent-runtime" "${actual_runtime}; guest kernel ${guest_kernel}"
 proof "proxy-runtime" "${proxy_runtime}; read-only=${proxy_readonly}; privileged=${proxy_privileged}"
 proof "proxy-boundaries" "interfaces=${proxy_network_count}; mounts=${proxy_mount_count}; drop=${proxy_cap_drop}; security-opt=${proxy_security_opt}"
+proof "network-topology" "agent=${network}(internal only); proxy=${network}+${egress_network}"
 proof "proxy-internal-address" "${PROXY_ALIAS}=${proxy_internal_ip}; injected into agent hosts file"
 proof "identity" "uid:gid=${actual_user}; privileged=${actual_privileged}"
 proof "root-filesystem" "read-only=${actual_readonly}; host/volume mounts=${mount_count}; devices=${device_count}"

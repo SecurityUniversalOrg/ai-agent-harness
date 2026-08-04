@@ -67,6 +67,7 @@ repo_root="$(cd "${MYTHOS_REPO_ROOT}" && pwd -P)"
 run_key="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-${RANDOM}"
 run_key="${run_key//[^A-Za-z0-9_.-]/-}"
 network="vulnhunt-mythos-${run_key}"
+egress_network="vulnhunt-mythos-egress-${run_key}"
 proxy_container="vulnhunt-mythos-proxy-${run_key}"
 agent_container="vulnhunt-mythos-agent-${run_key}"
 agent_image="vulnhunt-mythos-agent:${run_key}"
@@ -81,6 +82,7 @@ cleanup() {
   docker rm -f "${agent_container}" >/dev/null 2>&1 || true
   docker rm -f "${proxy_container}" >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || true
+  docker network rm "${egress_network}" >/dev/null 2>&1 || true
   docker image rm -f "${agent_image}" >/dev/null 2>&1 || true
   docker image rm -f "${proxy_image}" >/dev/null 2>&1 || true
   rm -rf -- "${control_dir}"
@@ -108,7 +110,12 @@ docker build \
   --tag "${proxy_image}" \
   "${repo_root}"
 
+docker network create "${egress_network}" >/dev/null
 docker network create --internal "${network}" >/dev/null
+[[ "$(docker network inspect --format '{{.Internal}}' "${egress_network}")" == "false" ]] \
+  || die "Proxy egress network is unexpectedly internal"
+[[ "$(docker network inspect --format '{{.Internal}}' "${network}")" == "true" ]] \
+  || die "Agent network is not internal"
 
 # The proxy is not exposed on the host. It has ordinary outbound networking,
 # then joins the agent's internal network under one fixed alias. Its Squid ACL
@@ -123,7 +130,7 @@ docker run --detach \
   --memory 256m \
   --cpus 0.5 \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777 \
-  --network "name=bridge,gw-priority=1" \
+  --network "name=${egress_network},gw-priority=1" \
   --network "name=${network},alias=${PROXY_ALIAS}" \
   "${proxy_image}" >/dev/null
 
