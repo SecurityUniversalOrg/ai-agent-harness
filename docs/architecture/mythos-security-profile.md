@@ -93,7 +93,9 @@ plane remain privileged assets and must not be reachable from the model containe
 
 The `org-ai-security-discovery.yaml` workflow offers three model choices. Opus runs
 on `ubuntu-latest`; Mythos targets a runner label/ARC scale-set name of `gvisor`.
-The composite action then selects the hardened launcher automatically.
+The composite action then selects the hardened launcher automatically. Every matrix
+row must provide `default_branch`; the workflow passes that value to both execution
+profiles rather than assuming `main`.
 
 Provision the `gvisor` scale set as ephemeral Linux runners with:
 
@@ -120,6 +122,10 @@ For horizontal scaling, use an Actions Runner Controller runner scale set named
 
 Select Mythos through workflow dispatch and check the retention acknowledgement.
 The action passes the model dynamically; no committed secret-bearing TOML is needed.
+For each repository, set `default_branch` in `config/repos.csv`. The action validates
+the ref name, and the trusted control plane clones only that branch at depth one before
+the credential-free checkout crosses into the gVisor container. A blank value fails
+matrix construction.
 The workflow exposes two independent booleans, both defaulting to `true`:
 
 - `publish_results` controls central report publication.

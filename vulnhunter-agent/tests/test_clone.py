@@ -106,6 +106,55 @@ class TestShallowClone:
         # The marker file from the previous "clone" must be gone.
         assert not (target / "marker.txt").exists()
 
+    def test_existing_clone_reused_only_when_requested_branch_matches(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "myrepo"
+        target.mkdir()
+        branch_check = _FakeCompleted(0)
+        branch_check.stdout = "release/2026.08\n"
+        monkeypatch.setattr(clone_mod, "_GIT_EXECUTABLE", "git")
+        monkeypatch.setattr(
+            clone_mod.subprocess,
+            "run",
+            lambda *a, **k: branch_check,
+        )
+
+        out = shallow_clone(
+            "https://github.com/org/myrepo",
+            tmp_path,
+            branch="release/2026.08",
+        )
+
+        assert out == target
+
+    def test_existing_clone_with_wrong_branch_fails_closed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "myrepo"
+        target.mkdir()
+        branch_check = _FakeCompleted(0)
+        branch_check.stdout = "main\n"
+        monkeypatch.setattr(clone_mod, "_GIT_EXECUTABLE", "git")
+        monkeypatch.setattr(
+            clone_mod.subprocess,
+            "run",
+            lambda *a, **k: branch_check,
+        )
+
+        with pytest.raises(RuntimeError, match="not requested branch.*--re-clone"):
+            shallow_clone(
+                "https://github.com/org/myrepo",
+                tmp_path,
+                branch="release/2026.08",
+            )
+
+        assert target.exists()
+
     def test_subprocess_returns_zero_returns_path(
         self, tmp_path: Path, captured_runs: list[dict[str, Any]]
     ) -> None:
@@ -114,6 +163,39 @@ class TestShallowClone:
         )
         assert out == tmp_path / "myrepo"
         assert len(captured_runs) == 1
+
+    def test_explicit_branch_is_cloned_single_branch(
+        self, tmp_path: Path, captured_runs: list[dict[str, Any]]
+    ) -> None:
+        shallow_clone(
+            "https://github.com/org/myrepo",
+            tmp_path,
+            branch="release/2026.08",
+        )
+
+        cmd = captured_runs[0]["cmd"]
+        branch_index = cmd.index("--branch")
+        assert cmd[branch_index + 1] == "release/2026.08"
+        assert "--single-branch" in cmd
+        assert cmd.index("--branch") < cmd.index("--")
+
+    @pytest.mark.parametrize(
+        "branch",
+        ["", "-danger", "../escape", "feature//x", "refs/heads/x.lock", "bad branch"],
+    )
+    def test_unsafe_branch_is_rejected_before_git(
+        self,
+        tmp_path: Path,
+        captured_runs: list[dict[str, Any]],
+        branch: str,
+    ) -> None:
+        with pytest.raises(ValueError, match="safe Git branch"):
+            shallow_clone(
+                "https://github.com/org/myrepo",
+                tmp_path,
+                branch=branch,
+            )
+        assert captured_runs == []
 
     def test_timeout_expired_cleanup_and_runtime_error(
         self,

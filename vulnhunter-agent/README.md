@@ -67,6 +67,10 @@ Then run a scan:
 ```bash
 python -m agent --mode=scan https://github.com/your-org/your-service
 
+# Scan an explicit branch rather than the remote default:
+python -m agent --mode=scan https://github.com/your-org/your-service \
+  --branch release/2026.08
+
 # Scan only, no publish/issues:
 python -m agent --mode=scan https://github.com/your-org/your-service --no-publish --no-issues
 ```
@@ -103,6 +107,20 @@ central destination is `VULNHUNT_REPORTS_REPOSITORY` (default: the workflow repo
 on `VULNHUNT_REPORTS_BRANCH` (default: `main`). Mythos still runs internally with
 `--no-publish --no-issues`; these operations happen only after the gVisor container has
 stopped, in the trusted action process.
+
+Organization scans take the target branch from the required `default_branch` value on
+each repository row in `config/repos.csv`. The matrix passes it to both the Opus and
+Mythos action paths; Opus supplies it to `agent --branch`, while the trusted Mythos
+control plane performs a depth-one, single-branch clone before copying the
+credential-free checkout into gVisor. For example:
+
+```csv
+owner,repo,default_branch,internet_facing
+your-org,your-service,release/2026.08,true
+```
+
+Blank branch values fail during matrix construction instead of silently scanning
+`main`. Branch names are validated before Git is invoked.
 
 Run automated remediation from a local report directory:
 

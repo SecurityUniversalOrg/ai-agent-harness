@@ -52,10 +52,17 @@ runs:
                 if not row.get("owner") or not row.get("repo"):
                     continue
 
+                default_branch = (row.get("default_branch") or "").strip()
+                if not default_branch:
+                    raise SystemExit(
+                        f"CSV row {reader.line_num}: default_branch is required for "
+                        f"{row['owner'].strip()}/{row['repo'].strip()}"
+                    )
+
                 rows.append({
                     "owner": row["owner"].strip(),
                     "repo": row["repo"].strip(),
-                    "default_branch": row.get("default_branch", "main").strip() or "main",
+                    "default_branch": default_branch,
                     "internet_facing": row.get("internet_facing", "false").strip() or "false",
                     "cloud_platform": row.get("cloud_platform", "unknown").strip() or "unknown",
                     "business_owner": row.get("business_owner", "unknown").strip() or "unknown",

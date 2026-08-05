@@ -47,6 +47,19 @@ repo_name="${BASH_REMATCH[2]}"
 repo_name="${repo_name%.git}"
 [[ "${repo_name}" != "." && "${repo_name}" != ".." ]] || die "Unsafe repository name"
 
+clone_branch_args=()
+agent_branch_args=()
+if [[ -n "${TARGET_BRANCH:-}" ]]; then
+  [[ "${TARGET_BRANCH}" != *$'\n'* && "${TARGET_BRANCH}" != *$'\r'* ]] \
+    || die "TARGET_BRANCH contains a newline"
+  [[ "${TARGET_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ && "${TARGET_BRANCH}" != -* ]] \
+    || die "TARGET_BRANCH is not a safe Git branch name"
+  git check-ref-format --branch "${TARGET_BRANCH}" >/dev/null 2>&1 \
+    || die "TARGET_BRANCH is not a valid Git branch name"
+  clone_branch_args=(--branch "${TARGET_BRANCH}" --single-branch)
+  agent_branch_args=(--branch "${TARGET_BRANCH}")
+fi
+
 runtime="${MYTHOS_DOCKER_RUNTIME:-runsc}"
 [[ "${runtime}" == "runsc" ]] \
   || die "Mythos profile is pinned to the gVisor runsc runtime; got ${runtime}"
@@ -103,7 +116,8 @@ GIT_CONFIG_COUNT=1 \
 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
 GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic_auth}" \
 GIT_TERMINAL_PROMPT=0 \
-  git clone --depth 1 --no-tags -- "${TARGET_REPOSITORY}" "${checkout_dir}"
+  git clone --depth 1 --no-tags "${clone_branch_args[@]}" -- \
+    "${TARGET_REPOSITORY}" "${checkout_dir}"
 unset basic_auth
 source_commit="$(git -C "${checkout_dir}" rev-parse HEAD)"
 [[ "${source_commit}" =~ ^[0-9a-fA-F]{7,64}$ ]] \
@@ -301,6 +315,7 @@ docker exec \
     --model "${MYTHOS_MODEL}" \
     --config /opt/vulnhunter-agent/agent/config.example.toml \
     --clone-dir /workspace/clones \
+    "${agent_branch_args[@]}" \
     --no-publish \
     --no-issues \
     "${TARGET_REPOSITORY}"

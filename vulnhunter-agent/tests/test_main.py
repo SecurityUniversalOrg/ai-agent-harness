@@ -81,6 +81,7 @@ def _patch_main_dependencies(
     calls: dict[str, Any] = {
         "publish": 0,
         "shallow": 0,
+        "shallow_kwargs": [],
         "run": 0,
         "download": 0,
         "post_issues": 0,
@@ -93,6 +94,7 @@ def _patch_main_dependencies(
 
     def fake_shallow_clone(*a: object, **k: object) -> Path:
         calls["shallow"] += 1
+        calls["shallow_kwargs"].append(k)
         return clone_dir
 
     async def fake_run_vulnhunt(*a: object, **k: object) -> Path | None:
@@ -178,6 +180,37 @@ def test_main_no_publish_prints_clone_and_results(
     assert f"Clone:    {clone}" in captured
     assert f"Results:  {results}" in captured
     assert "Publish:  skipped (--no-publish flag)" in captured
+
+
+def test_main_threads_requested_branch_to_clone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    populated_agent_config,
+) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    results = clone / "x_VULNHUNT_RESULTS_y"
+    results.mkdir()
+    calls = _patch_main_dependencies(
+        monkeypatch,
+        config=populated_agent_config,
+        clone_dir=clone,
+        results_dir=results,
+    )
+
+    rc = main(
+        [
+            "--mode=scan",
+            "https://github.com/o/r",
+            "--branch",
+            "release/2026.08",
+            "--no-publish",
+            "--no-issues",
+        ]
+    )
+
+    assert rc == 0
+    assert calls["shallow_kwargs"][0]["branch"] == "release/2026.08"
 
 
 def test_main_publish_enabled_succeeds(
@@ -698,6 +731,12 @@ class TestBuildParserNewFlags:
     def test_no_scan_parses(self) -> None:
         args = _build_parser().parse_args(["--mode=scan", "url", "--no-scan"])
         assert args.scan is False
+
+    def test_repository_branch_parses(self) -> None:
+        args = _build_parser().parse_args(
+            ["--mode=scan", "url", "--branch", "release/2026.08"]
+        )
+        assert args.branch == "release/2026.08"
 
     def test_local_delivery_flags_parse(self) -> None:
         args = _build_parser().parse_args(

@@ -3,6 +3,7 @@
 Usage (scan mode):
     python -m agent --mode=scan <repo-url> [--config PATH] [--model MODEL]
                                             [--clone-dir DIR] [--re-clone]
+                                            [--branch BRANCH]
                                             [--scan | --no-scan]
                                             [--publish | --no-publish]
                                             [--issues | --no-issues]
@@ -145,6 +146,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--clone-dir",
         default=None,
         help="Override scan.clone_base_dir from config",
+    )
+    scan_section.add_argument(
+        "--branch",
+        default=None,
+        help="Clone and scan this explicit repository branch instead of the "
+        "remote default branch.",
     )
     scan_section.add_argument(
         "--re-clone",
@@ -1070,6 +1077,7 @@ async def _run_scan_flow(
                 re_clone=args.re_clone,
                 github_token=get_github_token("scan", config),
                 github_host=config.github.host,
+                branch=args.branch,
             )
             results_dir = await run_vulnhunt(
                 clone_dir,
@@ -1520,6 +1528,8 @@ def main(argv: list[str] | None = None) -> int:
         scan_only_flags = []
         if args.clone_dir is not None:
             scan_only_flags.append("--clone-dir")
+        if args.branch is not None:
+            scan_only_flags.append("--branch")
         if args.re_clone:
             scan_only_flags.append("--re-clone")
         if args.scan_id:
@@ -1556,6 +1566,8 @@ def main(argv: list[str] | None = None) -> int:
         fix_invalid_flags = []
         if args.clone_dir is not None:
             fix_invalid_flags.append("--clone-dir")
+        if args.branch is not None:
+            fix_invalid_flags.append("--branch")
         if args.re_clone:
             fix_invalid_flags.append("--re-clone")
         if args.scan_id:

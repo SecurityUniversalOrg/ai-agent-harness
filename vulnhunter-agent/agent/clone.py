@@ -26,6 +26,7 @@ _GIT_EXECUTABLE: str | None = shutil.which("git")
 # leading-dash option payload — is refused before it reaches a git argv
 # (CWE-88 argv option injection, CQ-1).
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
 def _reject_option_like(value: str, what: str) -> None:
@@ -39,6 +40,23 @@ def _reject_option_like(value: str, what: str) -> None:
         raise RuntimeError(
             f"refusing {what} that looks like a git option: {value!r}"
         )
+
+
+def _validate_branch(branch: str) -> None:
+    """Reject unsafe or malformed branch names before invoking Git."""
+    components = branch.split("/")
+    if (
+        not branch
+        or not _SAFE_BRANCH_RE.fullmatch(branch)
+        or branch.startswith(("-", "/", "."))
+        or branch.endswith(("/", "."))
+        or ".." in branch
+        or "//" in branch
+        or "@{" in branch
+        or branch == "@"
+        or any(part.startswith(".") or part.endswith(".lock") for part in components)
+    ):
+        raise ValueError(f"branch is not a safe Git branch name: {branch!r}")
 
 
 def _derive_repo_name(repo_url: str) -> str:
@@ -63,6 +81,7 @@ def shallow_clone(
     github_host: str = "github.com",
     allowed_token_path_prefixes: Iterable[str] | None = None,
     token_in_environment: bool = False,
+    branch: str | None = None,
 ) -> Path:
     """Shallow-clone repo_url into <clone_base_dir>/<repo_name>.
 
@@ -80,20 +99,57 @@ def shallow_clone(
     Set ``token_in_environment`` to authenticate through a process-local Git
     credential helper instead of embedding the token in the clone URL. This is
     preferred for unattended remediation because the secret then appears in
-    neither argv nor the stored remote URL.
+    neither argv nor the stored remote URL. When ``branch`` is provided, Git
+    clones that branch explicitly with ``--single-branch``; ``None`` preserves
+    the remote repository's default-branch behavior.
     """
+    if branch is not None:
+        _validate_branch(branch)
+
     base = Path(clone_base_dir).expanduser().resolve()
     base.mkdir(parents=True, exist_ok=True)
     target = base / _derive_repo_name(repo_url)
 
     if target.exists():
         if not re_clone:
-            logger.info("Reusing existing clone: %s", target)
+            if branch is not None:
+                if _GIT_EXECUTABLE is None:
+                    raise RuntimeError("git not on PATH; cannot validate clone branch")
+                branch_check = subprocess.run(  # nosec B603 - static argv
+                    [
+                        _GIT_EXECUTABLE,
+                        "symbolic-ref",
+                        "--quiet",
+                        "--short",
+                        "HEAD",
+                    ],
+                    cwd=str(target),
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                current_branch = branch_check.stdout.strip()
+                if branch_check.returncode != 0 or current_branch != branch:
+                    observed = current_branch or "detached/unknown"
+                    raise RuntimeError(
+                        f"existing clone {target} is on branch {observed!r}, not "
+                        f"requested branch {branch!r}; use --re-clone"
+                    )
+            logger.info(
+                "Reusing existing clone%s: %s",
+                f" on branch {branch}" if branch else "",
+                target,
+            )
             return target
         logger.info("Removing existing clone (re-clone requested): %s", target)
         shutil.rmtree(target)
 
-    logger.info("Cloning %s -> %s", redact(repo_url), target)
+    logger.info(
+        "Cloning %s%s -> %s",
+        redact(repo_url),
+        f" (branch={branch})" if branch else "",
+        target,
+    )
     # GIT_TERMINAL_PROMPT=0 makes git fail instead of hanging on a tty
     # credential prompt that would otherwise be hidden. We deliberately
     # leave GIT_ASKPASS and the user's credential.helper alone so the
@@ -146,8 +202,12 @@ def shallow_clone(
         # --depth 1 --"); effective_url comes from the agent's own URL
         # validation + token injection; target is a Path the agent
         # owns. Absolute git path resolved at module load (kills B607).
+        clone_cmd = [_GIT_EXECUTABLE, "clone", "--progress", "--depth", "1"]
+        if branch is not None:
+            clone_cmd.extend(["--branch", branch, "--single-branch"])
+        clone_cmd.extend(["--", effective_url, str(target)])
         result = subprocess.run(  # nosec B603
-            [_GIT_EXECUTABLE, "clone", "--progress", "--depth", "1", "--", effective_url, str(target)],
+            clone_cmd,
             text=True,
             timeout=timeout_seconds,
             env=env,

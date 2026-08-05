@@ -53,6 +53,11 @@ inputs:
     description: GitHub repository URL to scan
     required: true
 
+  repository-branch:
+    description: Explicit target branch to scan (empty uses the repository default)
+    required: false
+    default: ""
+
   python-version:
     description: Python version used to execute the agent
     required: false
@@ -81,6 +86,7 @@ runs:
         SCAN_TOKEN: ${{ inputs.scan-token }}
         REPORTS_TOKEN: ${{ inputs.reports-token }}
         TARGET_REPOSITORY: ${{ inputs.repository-url }}
+        TARGET_BRANCH: ${{ inputs.repository-branch }}
         MODEL: ${{ inputs.model }}
         MYTHOS_RETENTION_ACKNOWLEDGED: ${{ inputs.mythos-retention-acknowledged }}
         PUBLISH_RESULTS: ${{ inputs.publish-results }}
@@ -112,6 +118,13 @@ runs:
         if [[ -z "${TARGET_REPOSITORY}" ]]; then
           echo "::error::The repository-url input is required."
           exit 1
+        fi
+        if [[ -n "${TARGET_BRANCH}" ]]; then
+          if [[ ! "${TARGET_BRANCH}" =~ ^[A-Za-z0-9._/-]+$ || "${TARGET_BRANCH}" == -* ]] \
+              || ! git check-ref-format --branch "${TARGET_BRANCH}" >/dev/null 2>&1; then
+            echo "::error::repository-branch is not a safe Git branch name."
+            exit 1
+          fi
         fi
 
         case "${MODEL}" in
@@ -165,6 +178,7 @@ runs:
         fi
 
         echo "Delivery configuration: publish-results=${PUBLISH_RESULTS}, submit-repo-issues=${SUBMIT_REPO_ISSUES}"
+        echo "Target branch: ${TARGET_BRANCH:-<repository default>}"
         if [[ "${PUBLISH_RESULTS}" == "true" ]]; then
           echo "Central reports destination is configured on branch ${REPORTS_BRANCH}."
         fi
@@ -190,6 +204,7 @@ runs:
         PUBLISH_RESULTS: ${{ inputs.publish-results }}
         SUBMIT_REPO_ISSUES: ${{ inputs.submit-repo-issues }}
         TARGET_REPOSITORY: ${{ inputs.repository-url }}
+        TARGET_BRANCH: ${{ inputs.repository-branch }}
         PYTHONUNBUFFERED: "1"
       run: |
         set -euo pipefail
@@ -203,6 +218,10 @@ runs:
         python3 -m pip install -e ".[dev]"
 
         echo "Scanning repository: ${TARGET_REPOSITORY}"
+        branch_args=()
+        if [[ -n "${TARGET_BRANCH}" ]]; then
+          branch_args=(--branch "${TARGET_BRANCH}")
+        fi
         publish_arg="--no-publish"
         issues_arg="--no-issues"
         [[ "${PUBLISH_RESULTS}" == "true" ]] && publish_arg="--publish"
@@ -211,6 +230,7 @@ runs:
           --mode=scan \
           --model "${VULNHUNT_ANTHROPIC_MODEL}" \
           --config agent/config.toml \
+          "${branch_args[@]}" \
           "${publish_arg}" \
           "${issues_arg}" \
           "${TARGET_REPOSITORY}"
@@ -244,6 +264,7 @@ runs:
       shell: bash
       env:
         TARGET_REPOSITORY: ${{ inputs.repository-url }}
+        TARGET_BRANCH: ${{ inputs.repository-branch }}
         VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
         VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
         # This token exists only in the trusted control-plane process. The

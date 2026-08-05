@@ -64,7 +64,7 @@ jobs:
           repos-csv: ${{ inputs.repos_csv || 'config/repos.csv' }}
 
   scan-repositories:
-    name: Scan ${{ matrix.owner }}/${{ matrix.repo }}
+    name: Scan ${{ matrix.owner }}/${{ matrix.repo }}@${{ matrix.default_branch }}
     # Mythos fails closed onto an ephemeral/self-hosted Linux runner that has
     # Docker's runsc runtime. Use an ARC runner scale set named `gvisor` for
     # horizontal scaling. Scheduled runs default to Opus on ubuntu-latest.
@@ -73,7 +73,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      max-parallel: 5
+      max-parallel: '30'
       matrix:
         include: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
 
@@ -105,6 +105,7 @@ jobs:
           reports-branch: ${{ vars.VULNHUNT_REPORTS_BRANCH || 'main' }}
           model: ${{ inputs.model || 'claude-opus-4-8' }}
           repository-url: "https://github.com/${{ matrix.owner }}/${{ matrix.repo }}"
+          repository-branch: ${{ matrix.default_branch }}
           python-version: "3.12"
           working-directory: ./vulnhunter-agent
 
@@ -123,6 +124,7 @@ jobs:
           model: claude-mythos-5
           mythos-retention-acknowledged: ${{ inputs.mythos_retention_acknowledged }}
           repository-url: "https://github.com/${{ matrix.owner }}/${{ matrix.repo }}"
+          repository-branch: ${{ matrix.default_branch }}
           python-version: "3.12"
           working-directory: ./vulnhunter-agent
 

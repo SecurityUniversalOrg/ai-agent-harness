@@ -21,11 +21,11 @@ sequenceDiagram
     participant GH as target GitHub repository
     participant Audit as manifest + audit streams
 
-    Caller->>CLI: python -m agent --mode=scan URL
+    Caller->>CLI: python -m agent --mode=scan URL [--branch BRANCH]
     CLI->>Config: load TOML, overlay env, validate stage combination
     CLI->>GH: preflight required scan/reports identities
-    CLI->>Git: shallow clone (or reuse)
-    Git-->>CLI: target checkout
+    CLI->>Git: shallow single-branch clone (or validated reuse)
+    Git-->>CLI: configured branch checkout
     CLI->>Runner: run_vulnhunt(checkout, policy)
     Runner->>Results: reject prior results and create timestamped directory
     Runner->>Config: refresh inference credential and build sandbox settings
@@ -390,7 +390,7 @@ sequenceDiagram
     C->>P: Probe HTTP CONNECT IP port and hostname policy
     P-->>C: Deny example.com IP and wrong port; allow exact AWS host on 443
     C->>D: Destroy credential-free canary environment
-    C->>G: Clone target with scan token
+    C->>G: Clone configured CSV branch with scan token
     C->>C: Build immutable agent and proxy images
     C->>D: Create internal network and runsc container
     D-->>C: Attest runtime network and read-only root
@@ -419,7 +419,8 @@ sequenceDiagram
 The preflight emits sanitized `ISOLATION_PROOF` records to the job log and GitHub step
 summary. It receives no AWS or GitHub credentials. The model container never receives
 either GitHub token. The scan reuses the checkout staged under its configured clone
-directory, loads only installed user settings, and runs with `--no-publish --no-issues`.
+directory after validating its branch, loads only installed user settings, and runs
+with `--no-publish --no-issues`.
 On success, a trusted `--no-scan --results-dir` process performs the independently
 enabled publish and issue stages. Both workflow controls default to enabled; disabling
 both leaves artifact upload as the only delivery route. See the
