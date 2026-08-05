@@ -326,16 +326,24 @@ report_output="${MYTHOS_OUTPUT_DIR}/${repo_name}"
 [[ ! -L "${MYTHOS_OUTPUT_DIR}" && ! -L "${report_output}" ]] \
   || die "Refusing to export through a symlinked output directory"
 mkdir -p "${report_output}"
-mapfile -t result_dirs < <(
-  docker exec "${agent_container}" find "/workspace/clones/${repo_name}" \
-    -mindepth 1 -maxdepth 1 -type d -name '*_VULNHUNT_RESULTS_*' -print
-)
-for result_dir in "${result_dirs[@]}"; do
+if (( scan_rc == 0 )); then
+  mapfile -t result_dirs < <(
+    docker exec "${agent_container}" find "/workspace/clones/${repo_name}" \
+      -mindepth 1 -maxdepth 1 -type d -name '*_VULNHUNT_RESULTS_*' -print
+  )
+  (( ${#result_dirs[@]} == 1 )) \
+    || die "Successful Mythos scan produced ${#result_dirs[@]} results directories; expected exactly one"
+
+  result_dir="${result_dirs[0]}"
   result_name="${result_dir##*/}"
   [[ "${result_name}" =~ ^[A-Za-z0-9._-]+_VULNHUNT_RESULTS_[A-Za-z0-9._-]+$ ]] \
     || die "Refusing to export unexpected result directory name: ${result_name}"
   docker exec "${agent_container}" test ! -L "${result_dir}" \
     || die "Refusing to export a symlinked result directory"
+  docker exec "${agent_container}" test -f "${result_dir}/README.md" \
+    || die "Successful Mythos scan did not produce a regular top-level README.md report"
+  docker exec "${agent_container}" test ! -L "${result_dir}/README.md" \
+    || die "Refusing to export a symlinked README.md report"
   unexpected_entry="$(docker exec "${agent_container}" find "${result_dir}" \
     -mindepth 1 \( -type l -o \( ! -type f ! -type d \) \) -print -quit)"
   [[ -z "${unexpected_entry}" ]] \
@@ -350,21 +358,21 @@ for result_dir in "${result_dirs[@]}"; do
   docker exec --user 65532:65532 "${agent_container}" tar \
       --hard-dereference -C "/workspace/clones/${repo_name}" -cf - -- "${result_name}" \
     | tar --no-same-owner --no-same-permissions -C "${report_output}" -xf -
-  [[ -d "${report_output}/${result_name}" ]] \
+
+  exported_results_dir="${report_output}/${result_name}"
+  [[ -d "${exported_results_dir}" ]] \
     || die "Streamed result export did not create ${result_name}"
-done
-if (( ${#result_dirs[@]} == 1 )); then
-  exported_results_dir="${report_output}/${result_dirs[0]##*/}"
+  [[ -f "${exported_results_dir}/README.md" && ! -L "${exported_results_dir}/README.md" ]] \
+    || die "Exported Mythos results do not contain a regular top-level README.md report"
+
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     {
       echo "results_dir=${exported_results_dir}"
       echo "source_commit=${source_commit}"
     } >> "${GITHUB_OUTPUT}"
   fi
-elif (( scan_rc == 0 )); then
-  die "Successful Mythos scan produced ${#result_dirs[@]} results directories; expected exactly one"
 else
-  echo "::warning::Failed Mythos scan produced ${#result_dirs[@]} results directories; delivery will not run"
+  echo "::warning::Mythos scan failed with exit code ${scan_rc}; partial report data will not be exported or delivered"
 fi
 
 audit_output="${report_output}/audit"
@@ -379,5 +387,5 @@ if docker exec "${agent_container}" test -d /home/appuser/.vulnhunter; then
       --hard-dereference -C /home/appuser/.vulnhunter -cf - . \
     | tar --no-same-owner --no-same-permissions -C "${audit_output}" -xf -
 fi
-echo "Mythos scan reports copied to ${report_output}"
+echo "Mythos scan outputs copied to ${report_output}"
 exit "${scan_rc}"

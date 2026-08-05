@@ -232,25 +232,6 @@ def _vulnhunt_skill_path() -> Path | None:
     return None
 
 
-def _find_results_dir(clone_dir: Path) -> Path | None:
-    """Return the most recently modified ``*_VULNHUNT_RESULTS_*`` dir.
-
-    Multiple results dirs can coexist if a previous run was kept (the
-    user chose not to ``--re-clone``). We pick the newest by mtime so a
-    fresh scan's results always win over older leftovers.
-    """
-    if not clone_dir.is_dir():
-        return None
-    candidates = [
-        entry
-        for entry in clone_dir.iterdir()
-        if entry.is_dir() and "_VULNHUNT_RESULTS_" in entry.name
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
-
-
 class PriorResultsError(RuntimeError):
     """Raised when an existing ``*_VULNHUNT_RESULTS_*`` dir would shadow this scan.
 
@@ -471,6 +452,24 @@ _CONTINUATION_PROMPT = (
     "report. Verify each phase's output files exist before moving on. "
     "Do not respond with a goodbye message until the report is written."
 )
+_MAX_REPORT_FINALIZATION_CONTINUATIONS = 3
+
+
+def _report_finalization_prompt(results_dir: Path) -> str:
+    """Tell the orchestrator exactly which required artifact is missing."""
+    return (
+        "The /vulnhunt workflow is not complete. No regular, non-symlink "
+        f"README.md exists at {results_dir / 'README.md'}. Resume the workflow "
+        "and finish every remaining phase, then write the required final "
+        "README.md report at that exact path. Do not stop after describing "
+        "what remains; use the available tools to complete it."
+    )
+
+
+def _has_complete_report(results_dir: Path) -> bool:
+    """Return whether the minimum trusted-delivery report contract is met."""
+    readme = results_dir / "README.md"
+    return readme.is_file() and not readme.is_symlink()
 
 
 class AuthRejectedError(RuntimeError):
@@ -485,6 +484,14 @@ class RateLimitError(RuntimeError):
     a restart would discard meaningful progress, and the harness's
     subprocess-level retry handles that case.
     """
+
+
+class ScanSessionError(RuntimeError):
+    """The SDK ended the scan with a non-retryable error result."""
+
+
+class IncompleteReportError(RuntimeError):
+    """The SDK session ended without its required README.md report."""
 
 
 @dataclass
@@ -713,14 +720,10 @@ async def run_vulnhunt(
                     options=options,
                     prompt=prompt,
                     clone_dir=clone_dir,
+                    results_dir=results_dir,
                     config=config,
                     model=model,
                 )
-                # _run_scan_session returns a session-only result; the
-                # scan-specific ``results_dir`` discovery happens here so
-                # the session helper stays reusable (see verify_runner).
-                if session_result is not None:
-                    session_result.results_dir = _find_results_dir(clone_dir)
     except RateLimitError as exc:
         # Tenacity raised the final cold-start failure (reraise=True). The
         # before_sleep hook already logged each intermediate retry, but
@@ -952,6 +955,7 @@ async def _run_scan_session(
     options: ClaudeAgentOptions,
     prompt: str,
     clone_dir: Path,
+    results_dir: Path,
     config: AgentConfig,
     model: str,
 ) -> _SessionResult:
@@ -980,6 +984,7 @@ async def _run_scan_session(
     # exiting prematurely.
     pending_tasks: set[str] = set()
     continuations = 0
+    report_finalization_continuations = 0
     # Count of consecutive continuations during which ZERO task lifecycle
     # events arrived (neither TaskStartedMessage nor terminal
     # TaskNotificationMessage). Reset to 0 the instant any task starts or
@@ -1019,6 +1024,7 @@ async def _run_scan_session(
     # arrives and we've made no progress — raised right after the inner
     # message loop exits so the caller's retry loop can back off.
     pending_rate_limit: RateLimitError | None = None
+    pending_session_error: ScanSessionError | None = None
 
     async with ClaudeSDKClient(options) as client:
         logger.info("Claude SDK client connected; sending /vulnhunt query")
@@ -1159,16 +1165,46 @@ async def _run_scan_session(
                             "ResultMessage before any AssistantMessage — "
                             "cold-start rate-limit; restart with backoff."
                         )
+                    elif getattr(message, "is_error", False):
+                        subtype = getattr(message, "subtype", None) or "unknown"
+                        pending_session_error = ScanSessionError(
+                            "Claude SDK ended the scan with a non-retryable "
+                            f"error ResultMessage (subtype={subtype!r}). See "
+                            "the preceding ResultMessage log for provider details."
+                        )
                     break
 
             if pending_rate_limit is not None:
                 raise pending_rate_limit
+            if pending_session_error is not None:
+                raise pending_session_error
             if not saw_result:
-                # receive_response() ended without a ResultMessage — treat
-                # as terminal (the SDK closed the stream).
+                # A closed stream is acceptable only if the report landed
+                # before the SDK disconnected. The post-loop contract check
+                # below turns every other case into a hard failure.
                 break
             if not pending_tasks:
-                break
+                if _has_complete_report(results_dir):
+                    break
+                if (
+                    report_finalization_continuations
+                    >= _MAX_REPORT_FINALIZATION_CONTINUATIONS
+                ):
+                    raise IncompleteReportError(
+                        "Claude SDK session ended without a regular, non-symlink "
+                        f"README.md at {results_dir / 'README.md'} after "
+                        f"{report_finalization_continuations} report-finalization "
+                        "continuations."
+                    )
+                report_finalization_continuations += 1
+                logger.warning(
+                    "SDK session became idle before README.md was written; "
+                    "requesting report finalization (%d/%d)",
+                    report_finalization_continuations,
+                    _MAX_REPORT_FINALIZATION_CONTINUATIONS,
+                )
+                await client.query(_report_finalization_prompt(results_dir))
+                continue
             # Progress accounting: a continuation cycle with at least one
             # task lifecycle event (start or terminal) is evidence of
             # forward progress and zeros the stall counter. Cycles with
@@ -1200,6 +1236,12 @@ async def _run_scan_session(
             )
             await client.query(_CONTINUATION_PROMPT)
 
+    if not _has_complete_report(results_dir):
+        raise IncompleteReportError(
+            "Claude SDK session closed before producing a regular, non-symlink "
+            f"README.md at {results_dir / 'README.md'}."
+        )
+
     elapsed = time.time() - start
     logger.info(
         "Run finished in %.1fs (%d messages, %d continuations, %d task(s) still pending)",
@@ -1212,11 +1254,10 @@ async def _run_scan_session(
     # each ResultMessage to one turn, so a per-message cost line under-reports
     # any run that needed continuations.
     log_session_totals(totals, "Scan")
-    # _run_scan_session returns a session-only result; the scan-specific
-    # ``results_dir`` discovery happens in ``run_vulnhunt`` so this helper
-    # stays reusable across scan and verify paths.
     return _SessionResult(
-        results_dir=None,
+        # Return the exact directory Python created for this run. Never
+        # rediscover output by choosing an arbitrary name-shaped directory.
+        results_dir=results_dir,
         cost_usd=totals.cost_usd,
         duration_s=elapsed,
         num_turns=totals.num_turns,

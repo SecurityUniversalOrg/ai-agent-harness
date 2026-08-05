@@ -688,6 +688,24 @@ class TestLocalResultsValidation:
         with pytest.raises(ValueError, match="basename must match"):
             _resolve_local_results(str(report))
 
+    def test_rejects_results_directory_without_readme(self, tmp_path: Path) -> None:
+        report = tmp_path / "repo_VULNHUNT_RESULTS_mythos5_1m_2026-08-04-141335"
+        report.mkdir()
+        with pytest.raises(ValueError, match="regular README.md"):
+            _resolve_local_results(str(report))
+
+    def test_rejects_symlinked_readme(self, tmp_path: Path) -> None:
+        target = tmp_path / "actual.md"
+        target.write_text("# Report\n", encoding="utf-8")
+        report = tmp_path / "repo_VULNHUNT_RESULTS_mythos5_1m_2026-08-04-141335"
+        report.mkdir()
+        try:
+            (report / "README.md").symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks are unavailable in this test environment")
+        with pytest.raises(ValueError, match="regular README.md"):
+            _resolve_local_results(str(report))
+
     def test_source_commit_is_validated_and_normalized(self) -> None:
         assert _resolve_source_commit("ABCDEF123456") == "abcdef123456"
         assert _resolve_source_commit(None) == "unknown"

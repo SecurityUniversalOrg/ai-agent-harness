@@ -43,7 +43,13 @@ sequenceDiagram
     Agents->>Results: phase3d_output.md
     Skill->>Results: final README.md
     SDK-->>Runner: streamed events and ResultMessage totals
-    Runner-->>CLI: newest results directory
+    Runner->>Runner: validate exact results directory and regular README.md
+    alt README.md is missing and retries remain
+        Runner->>SDK: request bounded report finalization
+        SDK->>Skill: resume remaining phases and write README.md
+    else report is complete
+        Runner-->>CLI: exact pre-created results directory
+    end
 
     opt publish enabled
         CLI->>Reports: ensure private destination, then copy, commit, and push report tree
@@ -402,7 +408,8 @@ sequenceDiagram
     P->>AWS: CONNECT exact regional endpoint
     AWS-->>A: Stream model response through proxy
     A-->>C: Persist scan report in ephemeral workspace
-    C->>C: Validate and export one results tree and source commit
+    C->>C: Validate one complete results tree with regular README.md
+    C->>C: Export report and trusted source commit
     C->>D: Destroy containers and networks
     opt Publish results enabled
         C->>R: Copy commit and push report with reports token
@@ -421,9 +428,13 @@ summary. It receives no AWS or GitHub credentials. The model container never rec
 either GitHub token. The scan reuses the checkout staged under its configured clone
 directory after validating its branch, loads only installed user settings, and runs
 with `--no-publish --no-issues`.
-On success, a trusted `--no-scan --results-dir` process performs the independently
-enabled publish and issue stages. Both workflow controls default to enabled; disabling
-both leaves artifact upload as the only delivery route. See the
+When the SDK becomes idle before the top-level `README.md` exists, the runner requests
+bounded report finalization and then fails the scan if the canonical report is still
+missing. The launcher exports no partial report and emits no delivery output for a failed
+scan. On success, a trusted `--no-scan --results-dir` process revalidates the regular,
+non-symlink `README.md` before performing the independently enabled publish and issue
+stages. Both workflow controls default to enabled; disabling both leaves artifact upload
+as the only delivery route. See the
 [Mythos security profile](mythos-security-profile.md) for the complete control and
 failure matrix.
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -25,10 +24,12 @@ from claude_agent_sdk import (
 from agent import runner as runner_mod
 from agent.runner import (
     AuthRejectedError,
+    IncompleteReportError,
     RateLimitError,
+    ScanSessionError,
     _agent_name_from_started,
     _build_vulnhunt_prompt,
-    _find_results_dir,
+    _has_complete_report,
     _is_auth_failure,
     _is_rate_limit_result,
     _is_rate_limit_system_message,
@@ -43,6 +44,9 @@ from agent.runner import (
     run_vulnhunt,
     set_verbosity,
 )
+
+
+_REAL_HAS_COMPLETE_REPORT = _has_complete_report
 
 
 # ---------------------------------------------------------------------------
@@ -193,41 +197,16 @@ class TestVulnhuntSkillPath:
 
 
 # ---------------------------------------------------------------------------
-# _find_results_dir
-# ---------------------------------------------------------------------------
-
-
-class TestFindResultsDir:
-    def test_no_clone_dir_returns_none(self, tmp_path: Path) -> None:
-        assert _find_results_dir(tmp_path / "missing") is None
-
-    def test_no_matching_subdir_returns_none(self, tmp_path: Path) -> None:
-        (tmp_path / "src").mkdir()
-        (tmp_path / "scripts").mkdir()
-        assert _find_results_dir(tmp_path) is None
-
-    def test_one_matching_returned(self, tmp_path: Path) -> None:
-        target = tmp_path / "x_VULNHUNT_RESULTS_y"
-        target.mkdir()
-        assert _find_results_dir(tmp_path) == target
-
-    def test_multiple_matching_returns_newest(self, tmp_path: Path) -> None:
-        older = tmp_path / "vulnhunter_VULNHUNT_RESULTS_old"
-        newer = tmp_path / "vulnhunter_VULNHUNT_RESULTS_new"
-        older.mkdir()
-        newer.mkdir()
-        os.utime(older, (1000, 1000))
-        os.utime(newer, (5000, 5000))
-        assert _find_results_dir(tmp_path) == newer
-
-
-# ---------------------------------------------------------------------------
 # Verbosity-gated logging
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
-def _reset_verbosity():
+def _reset_runner_test_state(monkeypatch: pytest.MonkeyPatch):
+    # Most runner tests exercise streaming/retry behavior and historically
+    # use an intentionally empty pre-created report directory. Keep those
+    # tests focused; report-contract tests below restore the real predicate.
+    monkeypatch.setattr(runner_mod, "_has_complete_report", lambda _path: True)
     set_verbosity(0)
     yield
     set_verbosity(0)
@@ -766,6 +745,120 @@ async def test_run_vulnhunt_happy_path_returns_results_dir(
     assert out.parent == clone
     assert "_VULNHUNT_RESULTS_" in out.name
     assert out.is_dir()
+
+
+class TestCompletedReportContract:
+    def test_requires_regular_non_symlink_readme(self, tmp_path: Path) -> None:
+        results = tmp_path / "repo_VULNHUNT_RESULTS_model_timestamp"
+        results.mkdir()
+        assert not _REAL_HAS_COMPLETE_REPORT(results)
+
+        readme = results / "README.md"
+        readme.mkdir()
+        assert not _REAL_HAS_COMPLETE_REPORT(results)
+        readme.rmdir()
+        readme.write_text("# report\n", encoding="utf-8")
+        assert _REAL_HAS_COMPLETE_REPORT(results)
+
+    def test_rejects_symlink_readme(self, tmp_path: Path) -> None:
+        target = tmp_path / "actual.md"
+        target.write_text("# report\n", encoding="utf-8")
+        results = tmp_path / "repo_VULNHUNT_RESULTS_model_timestamp"
+        results.mkdir()
+        try:
+            (results / "README.md").symlink_to(target)
+        except OSError:
+            pytest.skip("symlinks are unavailable in this test environment")
+        assert not _REAL_HAS_COMPLETE_REPORT(results)
+
+
+@pytest.mark.asyncio
+async def test_run_vulnhunt_finalizes_missing_readme_before_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    populated_agent_config,
+) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    fake = _patch_run_vulnhunt_environment(
+        monkeypatch,
+        scripts=[[_result_message()], [_result_message()]],
+        skill_path=tmp_path / "skill",
+    )
+    monkeypatch.setattr(
+        runner_mod, "_has_complete_report", _REAL_HAS_COMPLETE_REPORT
+    )
+
+    async def query_and_finish_report(prompt: str) -> None:
+        fake.queries.append(prompt)
+        if len(fake.queries) == 2:
+            result_dirs = list(clone.glob("*_VULNHUNT_RESULTS_*"))
+            assert len(result_dirs) == 1
+            (result_dirs[0] / "README.md").write_text(
+                "# completed report\n", encoding="utf-8"
+            )
+
+    fake.query = query_and_finish_report  # type: ignore[method-assign]
+
+    out = await run_vulnhunt(clone, populated_agent_config)
+
+    assert out is not None
+    assert (out / "README.md").is_file()
+    assert len(fake.queries) == 2
+    assert "not complete" in fake.queries[1]
+    assert str(out / "README.md") in fake.queries[1]
+
+
+@pytest.mark.asyncio
+async def test_run_vulnhunt_fails_after_report_finalization_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    populated_agent_config,
+) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    fake = _patch_run_vulnhunt_environment(
+        monkeypatch,
+        scripts=[[_result_message()], [_result_message()], [_result_message()]],
+        skill_path=tmp_path / "skill",
+    )
+    monkeypatch.setattr(
+        runner_mod, "_has_complete_report", _REAL_HAS_COMPLETE_REPORT
+    )
+    monkeypatch.setattr(runner_mod, "_MAX_REPORT_FINALIZATION_CONTINUATIONS", 2)
+
+    with pytest.raises(IncompleteReportError, match="README.md"):
+        await run_vulnhunt(clone, populated_agent_config)
+
+    assert len(fake.queries) == 3
+
+
+@pytest.mark.asyncio
+async def test_run_vulnhunt_rejects_non_retryable_error_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    populated_agent_config,
+) -> None:
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    error_result = ResultMessage(
+        subtype="error",
+        duration_ms=10,
+        duration_api_ms=5,
+        is_error=True,
+        num_turns=1,
+        session_id="s",
+        total_cost_usd=0.0,
+        errors=["terminal scan failure"],
+    )
+    _patch_run_vulnhunt_environment(
+        monkeypatch,
+        scripts=[[error_result]],
+        skill_path=tmp_path / "skill",
+    )
+
+    with pytest.raises(ScanSessionError, match="non-retryable"):
+        await run_vulnhunt(clone, populated_agent_config)
 
 
 @pytest.mark.asyncio

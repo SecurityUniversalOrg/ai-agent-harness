@@ -92,6 +92,10 @@ python -m agent --mode=scan \
 `--results-dir` rejects symlinked or non-standard report directories, and
 `--source-commit` accepts only a hexadecimal Git commit. Publishing and issue submission
 are independent, so either flag may be paired with its `--no-*` counterpart.
+The directory must contain a regular, non-symlink top-level `README.md`; a directory name
+alone is not a completed report. Agent-driven scans issue bounded report-finalization
+continuations when that entry point is missing and fail without publishing or submitting
+issues if the model still does not produce it.
 
 Reviewed execution models are `claude-opus-4-7`, `claude-opus-4-8`, and
 `claude-mythos-5`. Mythos is intentionally not a local drop-in override: it has no

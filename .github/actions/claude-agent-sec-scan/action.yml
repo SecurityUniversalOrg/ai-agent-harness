@@ -312,6 +312,10 @@ runs:
           echo "::error::The Mythos scan did not export a deliverable results directory."
           exit 1
         }
+        [[ -f "${RESULTS_DIR}/README.md" && ! -L "${RESULTS_DIR}/README.md" ]] || {
+          echo "::error::The Mythos scan exported an incomplete report: a regular, non-symlink top-level README.md is required."
+          exit 1
+        }
         [[ "${SOURCE_COMMIT}" =~ ^[0-9a-fA-F]{7,64}$ ]] || {
           echo "::error::The Mythos scan did not emit a valid source commit."
           exit 1

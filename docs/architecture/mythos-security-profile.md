@@ -60,8 +60,10 @@ The control plane is trusted and short-lived. It owns cloning, image building,
 artifact extraction, and configured delivery. The model container is untrusted: it
 has no host bind mount, Docker socket, GitHub token, report token, cloud metadata
 route, or general Internet route. The checkout and all model state live on run-scoped
-tmpfs. Delivery starts only after the launcher validates and exports exactly one
-standard-named, non-symlink results tree and emits the trusted checkout commit SHA.
+tmpfs. Delivery starts only after the runner has completed exactly one standard-named,
+non-symlink results tree with a regular top-level `README.md`. The launcher independently
+validates that contract before and after export, then emits the exported path and trusted
+checkout commit SHA. A failed or incomplete scan emits no delivery output.
 
 ## Layered controls
 
@@ -83,7 +85,7 @@ standard-named, non-symlink results tree and emits the trusted checkout commit S
 | Startup attestation | Launcher checks the runtime exists, then verifies Docker reports `Runtime=runsc`, the intended network, and a read-only root before setting `VULNHUNT_MYTHOS_HARDENED_RUNTIME=1` |
 | Auditable preflight | The composite action first launches a credential-free disposable canary under the same gVisor, filesystem, capability, namespace, and egress constraints; it prints sanitized `ISOLATION_PROOF` records and fails unless direct HTTP/HTTPS and proxied `example.com` access are denied and the allowlisted AWS endpoint completes a CA- and hostname-verified TLS handshake |
 | Egress canaries | Before inference, direct `1.1.1.1:443` must fail, `CONNECT example.com:443` must return 403, and the exact AWS CONNECT must return 200 |
-| Output boundary | Model output is copied out only after execution; delivery revalidates the local results basename and source SHA before publishing or issue mutation |
+| Output boundary | An idle SDK session receives bounded finalization prompts until its regular, non-symlink top-level `README.md` exists, then fails closed if it remains absent; the launcher exports only a successful, complete tree, rechecks the host copy, and delivery revalidates the basename, README, and source SHA before publishing or issue mutation |
 
 These are defense-in-depth layers. gVisor reduces exposure to the host kernel, but
 it is not a proof that escape is impossible. The Docker daemon and runner control
