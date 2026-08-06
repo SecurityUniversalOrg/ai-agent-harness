@@ -1,0 +1,235 @@
+name: VulnHunter Agent Verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_urls_json:
+        description: JSON array of one or more closed VulnHunter issue URLs
+        required: true
+        type: string
+      expected_repository:
+        description: Required owner/name target repository scope
+        required: true
+        type: string
+      reports_repository:
+        description: Central reports repository in owner/name form
+        required: true
+        type: string
+      reports_branch:
+        description: Central reports branch
+        required: false
+        default: main
+        type: string
+      commit:
+        description: Optional target commit SHA
+        required: false
+        default: ""
+        type: string
+      model:
+        description: Reviewed verification model
+        required: true
+        default: claude-opus-4-8
+        type: choice
+        options:
+          - claude-opus-4-7
+          - claude-opus-4-8
+      post_comments:
+        description: Post validated verdict comments
+        required: false
+        default: false
+        type: boolean
+      reopen_nonfixed:
+        description: Reopen non-fixed findings; requires post_comments
+        required: false
+        default: false
+        type: boolean
+      artifact_retention_days:
+        description: Sensitive verification artifact retention
+        required: false
+        default: 14
+        type: number
+      timeout_minutes:
+        description: Job timeout
+        required: false
+        default: 120
+        type: number
+  workflow_call:
+    inputs:
+      issue_urls_json:
+        required: true
+        type: string
+      expected_repository:
+        required: true
+        type: string
+      reports_repository:
+        required: true
+        type: string
+      reports_branch:
+        required: false
+        default: main
+        type: string
+      commit:
+        required: false
+        default: ""
+        type: string
+      model:
+        required: false
+        default: claude-opus-4-8
+        type: string
+      post_comments:
+        required: false
+        default: false
+        type: boolean
+      reopen_nonfixed:
+        required: false
+        default: false
+        type: boolean
+      artifact_retention_days:
+        required: false
+        default: 14
+        type: number
+      timeout_minutes:
+        required: false
+        default: 120
+        type: number
+    outputs:
+      disposition_count:
+        value: ${{ jobs.verify.outputs.disposition-count }}
+      verdict_counts_json:
+        value: ${{ jobs.verify.outputs.verdict-counts-json }}
+    secrets:
+      ANTHROPIC_AWS_WORKSPACE_ID:
+        required: true
+      ANTHROPIC_AWS_API_KEY:
+        required: true
+      VULNHUNT_GITHUB_VERIFY_TOKEN:
+        required: true
+      VULNHUNT_GITHUB_REPORTS_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: vulnhunter-verify-${{ inputs.expected_repository }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify VulnHunter findings
+    runs-on: ${{ vars.VULNHUNT_VERIFY_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    environment: vulnhunter-verify
+    outputs:
+      disposition-count: ${{ steps.attest.outputs.disposition-count }}
+      verdict-counts-json: ${{ steps.attest.outputs.verdict-counts-json }}
+
+    steps:
+      - name: Enforce trusted same-repository workflow invocation
+        if: ${{ !startsWith(github.workflow_ref, format('{0}/', github.repository)) }}
+        shell: bash
+        run: |
+          echo "Cross-repository workflow_call is not supported because this workflow executes local composite actions." >&2
+          exit 64
+
+      - name: Checkout trusted workflow repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up VulnHunter agent
+        id: setup
+        uses: ./.github/actions/setup-vulnhunter-agent
+        with:
+          python-version: "3.12"
+          working-directory: vulnhunter-agent
+          config-path: vulnhunter-agent/agent/config.example.toml
+          install-skills: "true"
+
+      - name: Validate issue provenance and batch scope
+        id: prepare
+        uses: ./.github/actions/prepare-vulnhunter-verify
+        with:
+          issue-urls-json: ${{ inputs.issue_urls_json }}
+          trusted-issue-authors: ${{ vars.VULNHUNT_TRUSTED_ISSUE_AUTHORS }}
+          expected-repository: ${{ inputs.expected_repository }}
+          verify-token: ${{ secrets.VULNHUNT_GITHUB_VERIFY_TOKEN }}
+          github-server-url: ${{ github.server_url }}
+          model: ${{ inputs.model }}
+          post-comments: ${{ inputs.post_comments }}
+          reopen-nonfixed: ${{ inputs.reopen_nonfixed }}
+
+      - name: Run fix verification
+        id: verify
+        continue-on-error: true
+        uses: ./.github/actions/run-vulnhunter-verify
+        with:
+          python-path: ${{ steps.setup.outputs.python-path }}
+          config-path: ${{ steps.setup.outputs.config-path }}
+          github-host: ${{ steps.prepare.outputs.github-host }}
+          issue-urls-json: ${{ steps.prepare.outputs.issue-urls-json }}
+          model: ${{ inputs.model }}
+          commit: ${{ inputs.commit }}
+          post-comments: ${{ inputs.post_comments }}
+          reopen-nonfixed: ${{ inputs.reopen_nonfixed }}
+          reports-repository-url: ${{ github.server_url }}/${{ inputs.reports_repository }}
+          reports-branch: ${{ inputs.reports_branch }}
+          aws-workspace-id: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
+          aws-api-key: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
+          verify-token: ${{ secrets.VULNHUNT_GITHUB_VERIFY_TOKEN }}
+          reports-token: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+
+      - name: Attest verify disposition
+        id: attest
+        if: always() && steps.verify.outputs.disposition-path != ''
+        continue-on-error: true
+        uses: ./.github/actions/attest-vulnhunter-verify
+        with:
+          python-path: ${{ steps.setup.outputs.python-path }}
+          schema-path: ${{ steps.setup.outputs.agent-directory }}/verify_disposition.schema.json
+          run-directory: ${{ steps.verify.outputs.run-directory }}
+          disposition-path: ${{ steps.verify.outputs.disposition-path }}
+          agent-exit-code: ${{ steps.verify.outputs.agent-exit-code }}
+          expected-count: ${{ steps.prepare.outputs.issue-count }}
+
+      - name: Package curated verify evidence
+        id: package
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/package-vulnhunter-run
+        with:
+          mode: verify
+          run-directory: ${{ steps.verify.outputs.run-directory }}
+          agent-exit-code: ${{ steps.verify.outputs.agent-exit-code || 'not-started' }}
+
+      - name: Upload sensitive verify evidence
+        id: upload
+        if: always() && steps.package.outputs.package-directory != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulnhunter-verify-${{ steps.prepare.outputs.target-key || github.run_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.package.outputs.package-directory }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+      - name: Enforce verify workflow outcome
+        if: always()
+        shell: bash
+        env:
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          PREPARE_OUTCOME: ${{ steps.prepare.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+          ATTEST_OUTCOME: ${{ steps.attest.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        run: |
+          set -euo pipefail
+          for outcome in "${SETUP_OUTCOME}" "${PREPARE_OUTCOME}" "${VERIFY_OUTCOME}" "${ATTEST_OUTCOME}" "${PACKAGE_OUTCOME}" "${UPLOAD_OUTCOME}"; do
+            [[ "${outcome}" == "success" ]] || {
+              echo "::error::VulnHunter verify did not complete every trusted workflow stage."
+              exit 1
+            }
+          done

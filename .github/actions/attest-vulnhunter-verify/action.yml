@@ -1,0 +1,112 @@
+name: Attest VulnHunter Verify
+description: Revalidates the aggregate verify disposition without GitHub or AWS credentials.
+
+inputs:
+  python-path:
+    required: true
+  schema-path:
+    description: Trusted verify_disposition.schema.json path.
+    required: true
+  run-directory:
+    required: true
+  disposition-path:
+    required: true
+  agent-exit-code:
+    required: true
+  expected-count:
+    required: true
+
+outputs:
+  disposition-count:
+    value: ${{ steps.attest.outputs.disposition-count }}
+  verdict-counts-json:
+    value: ${{ steps.attest.outputs.verdict-counts-json }}
+  attestation-path:
+    value: ${{ steps.attest.outputs.attestation-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate verify disposition
+      id: attest
+      shell: bash
+      env:
+        PYTHON_PATH: ${{ inputs.python-path }}
+        SCHEMA_PATH: ${{ inputs.schema-path }}
+        RUN_DIRECTORY: ${{ inputs.run-directory }}
+        DISPOSITION_PATH: ${{ inputs.disposition-path }}
+        AGENT_EXIT_CODE: ${{ inputs.agent-exit-code }}
+        EXPECTED_COUNT: ${{ inputs.expected-count }}
+      run: |
+        set -euo pipefail
+        [[ -n "${RUN_DIRECTORY}" && -n "${DISPOSITION_PATH}" ]] || {
+          echo "::error::The verify process did not create one attestable disposition."
+          exit 1
+        }
+
+        "${PYTHON_PATH}" - <<'PY'
+        import collections
+        import json
+        import os
+        from pathlib import Path
+
+        from jsonschema import Draft202012Validator, FormatChecker
+
+        run_dir = Path(os.environ["RUN_DIRECTORY"]).resolve(strict=True)
+        disposition = Path(os.environ["DISPOSITION_PATH"])
+        schema_path = Path(os.environ["SCHEMA_PATH"])
+        expected_count = int(os.environ["EXPECTED_COUNT"])
+        agent_rc = int(os.environ["AGENT_EXIT_CODE"])
+        if agent_rc not in {0, 1, 2, 3, 64, 130}:
+            raise SystemExit(f"Unexpected verify agent exit code: {agent_rc}")
+        if disposition.is_symlink() or not disposition.is_file() or disposition.stat().st_size > 10_000_000:
+            raise SystemExit("Verify disposition must be a regular non-symlink file no larger than 10 MB")
+        resolved = disposition.resolve(strict=True)
+        if run_dir not in resolved.parents:
+            raise SystemExit("Verify disposition escapes the run directory")
+        if schema_path.is_symlink() or not schema_path.is_file():
+            raise SystemExit("Trusted verify schema is unavailable")
+
+        payload = json.loads(disposition.read_text(encoding="utf-8"))
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        errors = sorted(
+            Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(payload),
+            key=lambda error: list(error.path),
+        )
+        if errors:
+            detail = "; ".join(error.message for error in errors[:5])
+            raise SystemExit(f"Verify disposition failed schema validation: {detail}")
+
+        if isinstance(payload, list):
+            entries = payload
+        elif isinstance(payload, dict) and isinstance(payload.get("dispositions"), list):
+            entries = payload["dispositions"]
+        elif isinstance(payload, dict) and "verdict" in payload:
+            entries = [payload]
+        else:
+            raise SystemExit("Verify disposition schema has no recognized disposition collection")
+        if len(entries) != expected_count:
+            raise SystemExit(f"Expected {expected_count} verify dispositions, found {len(entries)}")
+
+        counts = collections.Counter(str(entry.get("verdict", "UNKNOWN")) for entry in entries)
+        counts_json = json.dumps(dict(sorted(counts.items())), separators=(",", ":"))
+        attestation = {
+            "schema_version": 1,
+            "mode": "verify",
+            "agent_exit_code": agent_rc,
+            "disposition_count": len(entries),
+            "verdict_counts": dict(sorted(counts.items())),
+        }
+        attestation_path = disposition.parent / "workflow_attestation.json"
+        attestation_path.write_text(json.dumps(attestation, indent=2) + "\n", encoding="utf-8")
+
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+            output.write(f"disposition-count={len(entries)}\n")
+            output.write(f"verdict-counts-json={counts_json}\n")
+            output.write(f"attestation-path={attestation_path}\n")
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+            summary.write("### VulnHunter verify attestation\n\n")
+            summary.write(f"- Dispositions: `{len(entries)}`\n")
+            for verdict, count in sorted(counts.items()):
+                summary.write(f"- `{verdict}`: `{count}`\n")
+        PY

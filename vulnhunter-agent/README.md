@@ -28,6 +28,21 @@ container) and wires the results into GitHub.
   `/vulnhunter-fix` fork workflow through RED→GREEN, bounded repair, sweep, seven
   delivery gates, and private-fork issue/PR delivery.
 
+GitHub Actions wrappers are available for both remediation modes:
+
+- `.github/workflows/vulnhunter-agent-fix.yaml` selects one exact published report and
+  defaults to credential-minimized `--no-post` execution.
+- `.github/workflows/vulnhunter-agent-verify.yaml` validates trusted issue provenance,
+  passes a JSON issue batch without shell interpolation, and defaults to `--no-post` plus
+  `--no-reopen`.
+
+Both workflows also expose `workflow_call`, retain the agent's exact process outcome while
+uploading curated evidence, and require protected `vulnhunter-fix` or
+`vulnhunter-verify` environments. See
+[GitHub Actions remediation and verification](../docs/architecture/github-actions-remediation.md).
+They currently accept Opus 4.7/4.8 only: the existing Mythos gVisor launcher is scan-only,
+so fix/verify Mythos automation remains fail-closed until mode-aware staged launchers exist.
+
 The agent hardcodes nothing sensitive: every host, credential, and path comes from a
 TOML config file and/or `VULNHUNT_*` environment variables, so the same image runs across
 environments without rebuilding.

@@ -1,0 +1,136 @@
+name: Run VulnHunter Verify
+description: Executes one homogeneous verify batch with argv-safe issue handling.
+
+inputs:
+  python-path:
+    required: true
+  config-path:
+    required: true
+  issue-urls-json:
+    required: true
+  model:
+    required: false
+    default: claude-opus-4-8
+  commit:
+    required: false
+    default: ""
+  post-comments:
+    required: false
+    default: "false"
+  reopen-nonfixed:
+    required: false
+    default: "false"
+  reports-repository-url:
+    required: true
+  reports-branch:
+    required: false
+    default: main
+  aws-workspace-id:
+    required: true
+  aws-api-key:
+    required: true
+  verify-token:
+    required: true
+  reports-token:
+    required: true
+
+  github-host:
+    description: GitHub hostname or hostname:port for agent URL and API policy.
+    required: true
+outputs:
+  agent-exit-code:
+    value: ${{ steps.run.outputs.agent-exit-code }}
+  run-directory:
+    value: ${{ steps.run.outputs.run-directory }}
+  disposition-path:
+    value: ${{ steps.run.outputs.disposition-path }}
+  scratch-base:
+    value: ${{ steps.run.outputs.scratch-base }}
+
+runs:
+  using: composite
+  steps:
+    - name: Execute fix verification
+      id: run
+      shell: bash
+      env:
+        PYTHON_PATH: ${{ inputs.python-path }}
+        CONFIG_PATH: ${{ inputs.config-path }}
+        ISSUE_URLS_JSON: ${{ inputs.issue-urls-json }}
+        MODEL: ${{ inputs.model }}
+        COMMIT: ${{ inputs.commit }}
+        POST_COMMENTS: ${{ inputs.post-comments }}
+        REOPEN_NONFIXED: ${{ inputs.reopen-nonfixed }}
+        VULNHUNT_ANTHROPIC_AUTH_MODE: anthropic_aws
+        VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
+        VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
+        VULNHUNT_ANTHROPIC_AWS_REGION: us-east-1
+        VULNHUNT_ANTHROPIC_MODEL: ${{ inputs.model }}
+        VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.verify-token }}
+        VULNHUNT_GITHUB_HOST: ${{ inputs.github-host }}
+        VULNHUNT_GITHUB_REPORTS_TOKEN: ${{ inputs.reports-token }}
+        VULNHUNT_PUBLISH_DESTINATION_REPO: ${{ inputs.reports-repository-url }}
+        VULNHUNT_PUBLISH_BRANCH: ${{ inputs.reports-branch }}
+        VULNHUNT_SANDBOX_ENABLED: "true"
+        VULNHUNT_SANDBOX_FAIL_IF_UNAVAILABLE: "true"
+        VULNHUNT_SANDBOX_ALLOW_UNSANDBOXED_COMMANDS: "false"
+        VULNHUNT_TELEMETRY_ENABLED: "false"
+        PYTHONUNBUFFERED: "1"
+      run: |
+        set -euo pipefail
+
+        for secret_value in "${VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID}" "${VULNHUNT_ANTHROPIC_AWS_API_KEY}" "${VULNHUNT_GITHUB_SCAN_TOKEN}" "${VULNHUNT_GITHUB_REPORTS_TOKEN}"; do
+          [[ -n "${secret_value}" ]] || { echo "::error::Verify credentials must not be empty."; exit 64; }
+          echo "::add-mask::${secret_value}"
+        done
+        [[ -x "${PYTHON_PATH}" && -f "${CONFIG_PATH}" ]] || { echo "::error::Verify runtime is not prepared."; exit 64; }
+        [[ -z "${COMMIT}" || "${COMMIT}" =~ ^[0-9a-fA-F]{7,64}$ ]] || { echo "::error::commit must be a 7-64 character hexadecimal SHA."; exit 64; }
+
+        mapfile -t issue_urls < <(python3 -c 'import json,os; values=json.loads(os.environ["ISSUE_URLS_JSON"]); [print(value) for value in values]')
+        (( ${#issue_urls[@]} > 0 )) || { echo "::error::Verify intake produced no issue URLs."; exit 64; }
+
+        scratch="${RUNNER_TEMP}/vulnhunter-verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        [[ ! -e "${scratch}" ]] || { echo "::error::Run-owned verify scratch path already exists."; exit 64; }
+        mkdir -m 0700 "${scratch}"
+
+        mutation_args=()
+        if [[ "${POST_COMMENTS}" != "true" ]]; then
+          mutation_args=(--no-post --no-reopen)
+        elif [[ "${REOPEN_NONFIXED}" != "true" ]]; then
+          mutation_args=(--no-reopen)
+        fi
+        commit_args=()
+        [[ -n "${COMMIT}" ]] && commit_args=(--commit "${COMMIT}")
+
+        set +e
+        "${PYTHON_PATH}" -m agent \
+          --mode=verify \
+          --config "${CONFIG_PATH}" \
+          --model "${MODEL}" \
+          --scratch-dir "${scratch}" \
+          "${commit_args[@]}" \
+          "${mutation_args[@]}" \
+          "${issue_urls[@]}"
+        agent_rc=$?
+        set -e
+
+        mapfile -d '' run_dirs < <(find "${scratch}" -mindepth 1 -maxdepth 1 -type d -print0)
+        run_dir=""
+        disposition=""
+        if (( ${#run_dirs[@]} == 1 )); then
+          run_dir="$(realpath -e "${run_dirs[0]}")"
+          case "${run_dir}" in "$(realpath -e "${scratch}")"/*) ;; *) echo "::error::Verify run escaped its scratch base."; exit 1 ;; esac
+          mapfile -d '' dispositions < <(find "${run_dir}" -type f -name verify_disposition.json -print0)
+          (( ${#dispositions[@]} == 1 )) && disposition="${dispositions[0]}"
+        elif (( ${#run_dirs[@]} > 1 )); then
+          echo "::error::Verify execution created multiple run directories."
+          agent_rc=1
+        fi
+
+        {
+          echo "agent-exit-code=${agent_rc}"
+          echo "run-directory=${run_dir}"
+          echo "disposition-path=${disposition}"
+          echo "scratch-base=${scratch}"
+        } >> "${GITHUB_OUTPUT}"
+        exit "${agent_rc}"

@@ -1,0 +1,196 @@
+name: Prepare VulnHunter Fix
+description: Validates fix policy and checks out one exact, link-free VulnHunter report.
+
+inputs:
+  target-repository:
+    description: Target repository in owner/name form.
+    required: true
+  reports-repository:
+    description: Repository containing the exact published report, in owner/name form.
+    required: true
+  reports-ref:
+    description: Trusted branch, tag, or commit containing the report.
+    required: false
+    default: main
+  results-path:
+    description: Exact repository-relative *_VULNHUNT_RESULTS_* directory.
+    required: true
+  reports-token:
+    description: Read-only token for the reports repository.
+    required: true
+  model:
+    description: Reviewed remediation model.
+    required: false
+    default: claude-opus-4-8
+  delivery-enabled:
+    description: Permit the agent's private-fork issue and PR delivery path.
+    required: false
+    default: "false"
+  test-policy:
+    description: "Regression policy: best-effort, must-pass, or skip."
+    required: false
+    default: best-effort
+  allowed-domains:
+    description: Comma-separated dependency domains added to the strict fix sandbox.
+    required: false
+    default: ""
+  fork-org:
+    description: Optional private-fork organization.
+    required: false
+    default: ""
+  github-server-url:
+    description: Trusted GitHub web origin.
+    required: false
+    default: https://github.com
+  checkout-directory:
+    description: Workspace-relative report checkout directory.
+    required: false
+    default: .vulnhunter-fix-report
+
+outputs:
+  target-url:
+    description: Canonical credential-free target URL.
+    value: ${{ steps.validate.outputs.target-url }}
+  target-key:
+    description: Artifact-safe target identifier.
+    value: ${{ steps.validate.outputs.target-key }}
+  report-directory:
+    description: Absolute path to the exact validated report directory.
+    value: ${{ steps.report.outputs.report-directory }}
+  scratch-base:
+    description: Empty run-owned scratch base.
+    value: ${{ steps.report.outputs.scratch-base }}
+
+  github-host:
+    description: Canonical GitHub hostname or hostname:port used by the agent.
+    value: ${{ steps.validate.outputs.github-host }}
+runs:
+  using: composite
+  steps:
+    - name: Validate fix intake
+      id: validate
+      shell: bash
+      env:
+        TARGET_REPOSITORY: ${{ inputs.target-repository }}
+        REPORTS_REPOSITORY: ${{ inputs.reports-repository }}
+        REPORTS_REF: ${{ inputs.reports-ref }}
+        RESULTS_PATH: ${{ inputs.results-path }}
+        REPORTS_TOKEN: ${{ inputs.reports-token }}
+        MODEL: ${{ inputs.model }}
+        DELIVERY_ENABLED: ${{ inputs.delivery-enabled }}
+        TEST_POLICY: ${{ inputs.test-policy }}
+        ALLOWED_DOMAINS: ${{ inputs.allowed-domains }}
+        FORK_ORG: ${{ inputs.fork-org }}
+        GITHUB_SERVER_URL_INPUT: ${{ inputs.github-server-url }}
+        CHECKOUT_DIRECTORY: ${{ inputs.checkout-directory }}
+      run: |
+        set -euo pipefail
+
+        for secret_value in "${REPORTS_TOKEN}"; do
+          [[ -n "${secret_value}" && "${secret_value}" != *$'\n'* && "${secret_value}" != *$'\r'* ]] || {
+            echo "::error::reports-token must be a non-empty single-line value."
+            exit 1
+          }
+          echo "::add-mask::${secret_value}"
+        done
+
+        repo_re='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+        [[ "${TARGET_REPOSITORY}" =~ ${repo_re} && "${REPORTS_REPOSITORY}" =~ ${repo_re} ]] || {
+          echo "::error::target-repository and reports-repository must use owner/name syntax."
+          exit 1
+        }
+        [[ "${TARGET_REPOSITORY}" != */. && "${TARGET_REPOSITORY}" != */.. ]] || exit 1
+        [[ "${REPORTS_REPOSITORY}" != */. && "${REPORTS_REPOSITORY}" != */.. ]] || exit 1
+        [[ "${GITHUB_SERVER_URL_INPUT}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || {
+          echo "::error::github-server-url must be an HTTPS origin without a path."
+          exit 1
+        }
+        [[ "${REPORTS_REF}" != -* && "${REPORTS_REF}" != *$'\n'* && "${REPORTS_REF}" != *$'\r'* && "${REPORTS_REF}" != *'..'* && "${REPORTS_REF}" != *'@{'* ]] || {
+          echo "::error::reports-ref is unsafe."
+          exit 1
+        }
+        [[ "${RESULTS_PATH}" != /* && "${RESULTS_PATH}" != *'\\'* && "${RESULTS_PATH}" != *'..'* && "${RESULTS_PATH}" == *_VULNHUNT_RESULTS_* ]] || {
+          echo "::error::results-path must be an exact relative VulnHunter results directory."
+          exit 1
+        }
+        [[ "${CHECKOUT_DIRECTORY}" =~ ^[A-Za-z0-9._/-]+$ && "${CHECKOUT_DIRECTORY}" != /* && "${CHECKOUT_DIRECTORY}" != *'..'* ]] || {
+          echo "::error::checkout-directory is unsafe."
+          exit 1
+        }
+        case "${MODEL}" in
+          claude-opus-4-7|claude-opus-4-8) ;;
+          claude-mythos-5) echo "::error::Mythos fix requires a dedicated mode-aware gVisor launcher; the current launcher is scan-only."; exit 1 ;;
+          *) echo "::error::Unsupported fix model: ${MODEL}"; exit 1 ;;
+        esac
+        [[ "${DELIVERY_ENABLED}" == "true" || "${DELIVERY_ENABLED}" == "false" ]] || {
+          echo "::error::delivery-enabled must be exactly true or false."
+          exit 1
+        }
+        case "${TEST_POLICY}" in best-effort|must-pass|skip) ;; *) echo "::error::Unsupported test-policy."; exit 1 ;; esac
+        [[ -z "${FORK_ORG}" || "${FORK_ORG}" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+          echo "::error::fork-org contains unsupported characters."
+          exit 1
+        }
+        if [[ -n "${ALLOWED_DOMAINS}" ]]; then
+          IFS=',' read -r -a domains <<< "${ALLOWED_DOMAINS}"
+          for domain in "${domains[@]}"; do
+            [[ "${domain}" =~ ^([A-Za-z0-9-]+\.)*[A-Za-z0-9-]+$ ]] || {
+              echo "::error::allowed-domains accepts comma-separated hostnames only."
+              exit 1
+            }
+          done
+        fi
+
+        server="${GITHUB_SERVER_URL_INPUT%/}"
+        github_host="${server#https://}"
+        github_host="${github_host,,}"
+        {
+          echo "target-url=${server}/${TARGET_REPOSITORY}"
+          echo "target-key=${TARGET_REPOSITORY//\//-}"
+          echo "github-host=${github_host}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Checkout exact reports revision
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.reports-repository }}
+        ref: ${{ inputs.reports-ref }}
+        token: ${{ inputs.reports-token }}
+        path: ${{ inputs.checkout-directory }}
+        persist-credentials: false
+        fetch-depth: 1
+        sparse-checkout: ${{ inputs.results-path }}
+        sparse-checkout-cone-mode: false
+
+    - name: Attest exact report tree
+      id: report
+      shell: bash
+      env:
+        CHECKOUT_DIRECTORY: ${{ inputs.checkout-directory }}
+        RESULTS_PATH: ${{ inputs.results-path }}
+      run: |
+        set -euo pipefail
+
+        checkout="$(realpath -e "${GITHUB_WORKSPACE}/${CHECKOUT_DIRECTORY}")"
+        report="$(realpath -e "${checkout}/${RESULTS_PATH}")"
+        case "${report}" in "${checkout}"/*) ;; *) echo "::error::Resolved report escapes its checkout."; exit 1 ;; esac
+        [[ -d "${report}" && ! -L "${report}" && -f "${report}/README.md" && ! -L "${report}/README.md" ]] || {
+          echo "::error::The exact results path must contain a regular, non-symlink README.md."
+          exit 1
+        }
+        unexpected="$(find "${report}" -mindepth 1 \( -type l -o \( ! -type f ! -type d \) \) -print -quit)"
+        [[ -z "${unexpected}" ]] || {
+          echo "::error::The selected report contains a symlink or special file."
+          exit 1
+        }
+
+        scratch="${RUNNER_TEMP}/vulnhunter-fix-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        [[ ! -e "${scratch}" ]] || {
+          echo "::error::Run-owned fix scratch path already exists."
+          exit 1
+        }
+        mkdir -m 0700 "${scratch}"
+        {
+          echo "report-directory=${report}"
+          echo "scratch-base=${scratch}"
+        } >> "${GITHUB_OUTPUT}"
