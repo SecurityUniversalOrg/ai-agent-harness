@@ -16,13 +16,19 @@ Primary provider references:
 
 ## Scope
 
-The scalable GitHub Actions profile supports read-only scan mode. It deliberately
-does not put report publishing or issue creation inside the Mythos container. After
-a successful report export, the trusted runner performs an independently configurable
-delivery phase; publishing and repository issue submission both default to enabled.
-Application policy also recognizes Mythos for fix and verify, but requires
-`--no-post` (and `--no-reopen` for verify), forbids extra model egress, and expects
-inputs to be staged by a separate control plane.
+The scalable GitHub Actions profile supports scan, fix, and verify. Scan is
+read-only and deliberately does not put report publishing or issue creation inside
+the Mythos container: after a successful report export, the trusted runner performs
+an independently configurable delivery phase; publishing and repository issue
+submission both default to enabled. Fix and verify are always local-only under
+Mythos — `--no-post` (and `--no-reopen` for verify) is mandatory, `fix.allowed_domains`
+is forbidden, and there is no delivery phase at all: a Mythos fix run can produce
+local branches and evidence but never a fork/PR/issue, and a Mythos verify run can
+produce a verdict disposition but never post or reopen anything. See
+[GitHub Actions remediation and verification](github-actions-remediation.md) for
+the fix/verify launcher contracts (`scripts/run_mythos_fix_sandbox.sh` and
+`scripts/run_mythos_verify_sandbox.sh`), which reuse this profile's container image,
+egress proxy, and isolation-proof canary unchanged.
 
 The exact Claude Platform on AWS model ID is `claude-mythos-5`. The exact regional
 endpoint is:
@@ -73,7 +79,7 @@ checkout commit SHA. A failed or incomplete scan emits no delivery output.
 | Data governance | `mythos.data_retention_acknowledged=true` is mandatory and fails before clone/model startup |
 | Provider route | `anthropic_aws`, `us-east-1`, workspace ID, and workspace API key are mandatory |
 | Process policy | Telemetry off; SDK sandbox forced on; fail if unavailable; unsandboxed fallback forbidden |
-| Tool policy | Scan is read-only; Bash cannot be enabled; model sees only the configured Read/Write/Glob/Agent envelope |
+| Tool policy | Scan and verify are read-only; Bash cannot be enabled for either. Fix is the one exception — it exposes Bash inside the gVisor container by design (the remediation skill must run tests) — but `fix.allowed_domains` is forbidden under Mythos, so that Bash has no route to install new dependencies; it can only exercise what the pre-staged checkout already vendors |
 | Settings isolation | Mythos loads only the installed user skill; target-controlled project/local Claude settings and hooks are not loaded |
 | Credential isolation | GitHub scan/report tokens exist only in trusted action steps and never enter the Mythos container; before no-tools post-scan finding-analysis calls, conventional GitHub credential variables are removed from the inherited child environment; AWS secrets use a mode-0600 Docker env file rather than argv |
 | Container boundary | `runsc`, non-root UID/GID 65532, read-only root, all Linux capabilities dropped, `no-new-privileges`, no devices/mounts/socket, private IPC, PID/file/memory/CPU limits |
@@ -93,11 +99,16 @@ plane remain privileged assets and must not be reachable from the model containe
 
 ## GitHub Actions and scale
 
-The `org-ai-security-discovery.yaml` workflow offers three model choices. Opus runs
-on `ubuntu-latest`; Mythos targets a runner label/ARC scale-set name of `gvisor`.
-The composite action then selects the hardened launcher automatically. Every matrix
-row must provide `default_branch`; the workflow passes that value to both execution
-profiles rather than assuming `main`.
+The `org-ai-security-discovery.yaml` (scan), `vulnhunter-agent-fix.yaml`, and
+`vulnhunter-agent-verify.yaml` workflows each offer the same three model choices.
+Opus runs on `ubuntu-latest`; Mythos targets a runner label/ARC scale-set name of
+`gvisor` (`VULNHUNT_FIX_GVISOR_RUNNER` / `VULNHUNT_VERIFY_GVISOR_RUNNER` variables
+override the default `gvisor` label per workflow). Scan's composite action selects
+the hardened launcher automatically; fix and verify select it the same way, through
+a model-conditional step/branch rather than a separate composite action — see
+[GitHub Actions remediation and verification](github-actions-remediation.md). Every
+scan matrix row must provide `default_branch`; the workflow passes that value to
+both execution profiles rather than assuming `main`.
 
 Provision the `gvisor` scale set as ephemeral Linux runners with:
 
@@ -196,3 +207,19 @@ The run stops before inference when any of these are true:
 - The outer GitHub runner can access supplied secrets by design. Use ephemeral
   runners, protected environments, scoped secrets, and separate AWS workspaces/API
   keys for Mythos workloads.
+- Mythos fix mode can never install a dependency the pre-staged checkout doesn't
+  already vendor (`fix.allowed_domains` is forbidden), so it is only useful for
+  findings whose fix doesn't require adding or upgrading a package. This is a
+  functional ceiling, not a bypassable control — widening it means widening the
+  container's only egress route beyond the Claude Platform endpoint.
+- Verify's trust boundary differs from scan and fix: the outer `python -m agent
+  --mode=verify` process (issue/comment/timeline fetch, target-repo clone) runs
+  on the `gvisor`-labeled runner but *outside* any gVisor container, because it
+  needs a real GitHub credential that must never reach the model. Only the model
+  turn itself — narratives, a pre-cloned checkout, and a pre-rendered kickoff
+  prompt, none of it credential-bearing — moves into the container, through
+  `agent/_mythos_verify_entry.py`. Scan and fix instead run their entire process
+  inside the container. Both shapes give the same guarantee (no GitHub credential
+  ever reaches the model), but verify's outer process is a wider trusted surface
+  than scan/fix's, simply because more of its logic (REST/GraphQL fetch, body
+  reconstruction, homogeneity checks) has no equivalent need to run isolated.

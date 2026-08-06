@@ -314,6 +314,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override fix.test_policy for regression execution. The finding's "
         "security test still runs under every policy.",
     )
+    fix_section.add_argument(
+        "--target-checkout",
+        default=None,
+        help="Use this already-cloned target-repo directory instead of cloning "
+        "target_repo. Requires --no-post. For a trusted host process that "
+        "clones the target with its own GitHub credential *before* handing "
+        "off to a network-isolated model session (e.g. the Mythos gVisor "
+        "launcher) that must never receive that credential.",
+    )
 
     # ---- shared logging --------------------------------------------------
 
@@ -1295,12 +1304,18 @@ async def _amain_verify(args: argparse.Namespace) -> int:
         )
 
     model = args.model or config.anthropic.model
+    # check_runtime_environment=False: this process does verify's trusted
+    # GitHub fetch/clone work outside any container, for every model
+    # including Mythos (see agent/verify_mythos.py). Only the model turn
+    # itself moves inside a gVisor container, through a separate entrypoint
+    # that performs its own full enforce_mythos_base_policy check.
     enforce_mythos_mode_policy(
         config,
         model,
         mode="verify",
         no_post=args.no_post,
         no_reopen=args.no_reopen,
+        check_runtime_environment=False,
     )
 
     # Apply verify-specific overrides to the config in place — verify.run_verify
@@ -1373,10 +1388,16 @@ async def _amain_fix(args: argparse.Namespace) -> int:
         no_post=args.no_post,
     )
 
+    if args.target_checkout is not None and not args.no_post:
+        raise ValueError("--target-checkout requires --no-post")
+
     # Fix always needs the scan identity, including --no-post: it clones the target
     # and performs read-only repo/access checks.  Standalone mode validates the token
     # before the expensive SDK session; broker mode was validated by the parent.
-    if not config.github.broker_token_dir:
+    # Exception: --target-checkout means a trusted caller already cloned the
+    # target with its own credential (e.g. a Mythos gVisor launcher's host-side
+    # control plane) and this process needs no GitHub identity at all.
+    if not config.github.broker_token_dir and args.target_checkout is None:
         results_scheme = urlparse(args.targets[1]).scheme.lower()
         _preflight_standalone_tokens(
             config=config,
@@ -1393,6 +1414,11 @@ async def _amain_fix(args: argparse.Namespace) -> int:
         if args.scratch_dir
         else None
     )
+    target_checkout_override = (
+        Path(args.target_checkout).expanduser().resolve()
+        if args.target_checkout is not None
+        else None
+    )
     return await fix_module.run_fix(
         config=config,
         target_repo=args.targets[0],
@@ -1401,6 +1427,7 @@ async def _amain_fix(args: argparse.Namespace) -> int:
         no_post=args.no_post,
         test_policy_override=args.test_policy,
         model_override=args.model,
+        target_checkout_override=target_checkout_override,
     )
 
 
@@ -1502,6 +1529,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--no-reopen is verify-mode only.")
         if args.test_policy is not None:
             parser.error("--test-policy is fix-mode only.")
+        if args.target_checkout is not None:
+            parser.error("--target-checkout is fix-mode only.")
 
         # Validate the --enable-bash / --no-read-only pairing before any
         # subsequent setup (logging, config load, clone) — the policy lives
@@ -1552,6 +1581,8 @@ def main(argv: list[str] | None = None) -> int:
             scan_only_flags.append("--enable-bash")
         if args.test_policy is not None:
             scan_only_flags.append("--test-policy")
+        if args.target_checkout is not None:
+            scan_only_flags.append("--target-checkout")
         if scan_only_flags:
             parser.error(
                 "These flags cannot be used with --mode=verify: "

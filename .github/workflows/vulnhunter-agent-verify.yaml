@@ -33,6 +33,12 @@ on:
         options:
           - claude-opus-4-7
           - claude-opus-4-8
+          - claude-mythos-5
+      mythos_retention_acknowledged:
+        description: Acknowledge mandatory 30-day Mythos request retention (no ZDR); ignored for Opus models
+        required: false
+        default: false
+        type: boolean
       post_comments:
         description: Post validated verdict comments
         required: false
@@ -76,6 +82,10 @@ on:
         required: false
         default: claude-opus-4-8
         type: string
+      mythos_retention_acknowledged:
+        required: false
+        default: false
+        type: boolean
       post_comments:
         required: false
         default: false
@@ -118,7 +128,14 @@ concurrency:
 jobs:
   verify:
     name: Verify VulnHunter findings
-    runs-on: ${{ vars.VULNHUNT_VERIFY_RUNNER || 'ubuntu-latest' }}
+    # Mythos fails closed onto an ephemeral/self-hosted Linux runner that has
+    # Docker's runsc runtime: python -m agent --mode=verify itself stays on
+    # this runner (it needs a real GitHub credential to fetch issue evidence
+    # and clone the target repo), but for claude-mythos-5 it shells out to
+    # scripts/run_mythos_verify_sandbox.sh to run the model turn inside a
+    # gVisor container — see agent/verify_mythos.py. Opus runs on an
+    # ordinary runner, unchanged.
+    runs-on: ${{ (inputs.model == 'claude-mythos-5') && (vars.VULNHUNT_VERIFY_GVISOR_RUNNER || 'gvisor') || (vars.VULNHUNT_VERIFY_RUNNER || 'ubuntu-latest') }}
     timeout-minutes: ${{ inputs.timeout_minutes }}
     environment: vulnhunter-verify
     outputs:
@@ -158,8 +175,33 @@ jobs:
           verify-token: ${{ secrets.VULNHUNT_GITHUB_VERIFY_TOKEN }}
           github-server-url: ${{ github.server_url }}
           model: ${{ inputs.model }}
+          mythos-retention-acknowledged: ${{ inputs.mythos_retention_acknowledged }}
           post-comments: ${{ inputs.post_comments }}
           reopen-nonfixed: ${{ inputs.reopen_nonfixed }}
+
+      - name: Validate and attest Mythos gVisor isolation
+        id: mythos-proof
+        if: inputs.model == 'claude-mythos-5'
+        shell: bash
+        env:
+          # Credential-free canary: proves the same runsc/read-only/tmpfs-only/
+          # single-host-egress boundaries the real run will use, before any
+          # model or GitHub credential is involved.
+          MYTHOS_REPO_ROOT: ${{ github.workspace }}
+          MYTHOS_DOCKER_RUNTIME: runsc
+        run: |
+          set -euo pipefail
+          chmod +x scripts/validate_mythos_isolation.sh
+          proof_log="${RUNNER_TEMP}/mythos-verify-isolation-proof-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.log"
+          scripts/validate_mythos_isolation.sh | tee "${proof_log}"
+          {
+            echo "### Mythos gVisor isolation proof (verify)"
+            echo
+            echo '```text'
+            grep '^ISOLATION_PROOF ' "${proof_log}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          rm -f -- "${proof_log}"
 
       - name: Run fix verification
         id: verify
@@ -221,6 +263,7 @@ jobs:
         env:
           SETUP_OUTCOME: ${{ steps.setup.outcome }}
           PREPARE_OUTCOME: ${{ steps.prepare.outcome }}
+          MYTHOS_PROOF_OUTCOME: ${{ steps.mythos-proof.outcome }}
           VERIFY_OUTCOME: ${{ steps.verify.outcome }}
           ATTEST_OUTCOME: ${{ steps.attest.outcome }}
           PACKAGE_OUTCOME: ${{ steps.package.outcome }}
@@ -233,3 +276,10 @@ jobs:
               exit 1
             }
           done
+          # mythos-proof only runs for claude-mythos-5 (if: inputs.model ==
+          # 'claude-mythos-5'); "skipped" is the correct, expected outcome for
+          # every Opus run. Anything else (failure/cancelled) is fatal.
+          [[ "${MYTHOS_PROOF_OUTCOME}" == "success" || "${MYTHOS_PROOF_OUTCOME}" == "skipped" ]] || {
+            echo "::error::Mythos gVisor isolation proof did not pass."
+            exit 1
+          }

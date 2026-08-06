@@ -444,7 +444,10 @@ The manual/reusable fix and verify workflows decompose trusted intake, model exe
 credential-free attestation, and artifact packaging into separate composite actions. Fix
 defaults to a local dry run; verify defaults to no comments and no reopen. Both preserve
 the agent's exact exit status through always-run evidence collection, then restore failure
-at the workflow boundary. See [GitHub Actions remediation and verification](github-actions-remediation.md)
+at the workflow boundary. Both also accept `claude-mythos-5`, which routes onto a
+`gvisor`-labeled runner and moves the model turn into a gVisor container that never
+receives a GitHub credential — see
+[GitHub Actions remediation and verification § Mythos gVisor execution](github-actions-remediation.md#mythos-gvisor-execution)
 for trust boundaries, inputs, secrets, artifacts, and operating procedures.
 
 ## Process outcomes

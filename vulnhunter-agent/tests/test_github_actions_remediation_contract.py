@@ -66,7 +66,10 @@ def test_fix_workflow_defaults_to_dry_run_and_protected_environment() -> None:
     assert "VULNHUNT_GITHUB_FIX_TOKEN" in text
     assert "VULNHUNT_GITHUB_REPORTS_TOKEN" in text
     assert "results-path: ${{ inputs.results_path }}" in text
-    assert "claude-mythos-5" not in text
+    assert "claude-mythos-5" in text
+    assert "mythos_retention_acknowledged:" in text
+    assert "validate_mythos_isolation.sh" in text
+    assert "gvisor" in text
 
 
 def test_fix_report_intake_is_exact_and_link_free() -> None:
@@ -77,7 +80,8 @@ def test_fix_report_intake_is_exact_and_link_free() -> None:
     assert "find \"${report}\"" in text
     assert "-type l" in text
     assert "Refusing" not in text or "symlink" in text
-    assert "dedicated mode-aware gVisor launcher" in text
+    assert "claude-mythos-5" in text
+    assert "mythos-retention-acknowledged" in text
 
 
 def test_fix_run_forces_strict_sandbox_and_uses_argv() -> None:
@@ -110,7 +114,8 @@ def test_verify_intake_requires_json_host_scope_state_and_trusted_author() -> No
     assert "is not closed" in text
     assert "configured HTTPS GitHub host" in text
     assert "eval " not in text
-    assert "dedicated staged-input gVisor launcher" in text
+    assert "claude-mythos-5" in text
+    assert "mythos-retention-acknowledged" in text
 
 
 def test_verify_run_maps_mutation_controls_and_builds_argv_array() -> None:
@@ -130,7 +135,10 @@ def test_verify_workflow_defaults_to_no_mutation_and_attests_count() -> None:
     assert "environment: vulnhunter-verify" in text
     assert "trusted-issue-authors: ${{ vars.VULNHUNT_TRUSTED_ISSUE_AUTHORS }}" in text
     assert "expected-count: ${{ steps.prepare.outputs.issue-count }}" in text
-    assert "claude-mythos-5" not in text
+    assert "claude-mythos-5" in text
+    assert "mythos_retention_acknowledged:" in text
+    assert "validate_mythos_isolation.sh" in text
+    assert "gvisor" in text
 
 
 def test_artifact_packaging_excludes_source_credentials_and_special_files() -> None:

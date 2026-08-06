@@ -374,6 +374,66 @@ async def test_run_verify_happy_path_fixed(
     assert "FIXED" in posted[0]["body"]
 
 
+@pytest.mark.asyncio
+async def test_run_verify_mythos_model_uses_gvisor_skill_runner_not_in_process_sdk(
+    verify_config,
+    respx_mock: respx.MockRouter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Selecting claude-mythos-5 must route the actual model turn through
+    ``verify_mythos.run_skill_mythos`` (which shells out to the gVisor
+    sandbox launcher) instead of the in-process ``_run_skill`` /
+    ``run_verify_session`` pair that every other model uses. Everything
+    before that call point — fetch, clone, homogeneity, pre-flight — is
+    unaffected: it still runs in this trusted process with the real
+    GitHub credential, for every model including Mythos."""
+    _mock_rest_calls(
+        respx_mock,
+        {42: _rest_issue(42, _issue_body())},
+    )
+    _patch_clone_and_report(monkeypatch, tmp_path)
+    _patch_token_manager(monkeypatch)
+
+    mythos_config = dataclasses.replace(
+        verify_config,
+        anthropic=dataclasses.replace(verify_config.anthropic, model="claude-mythos-5"),
+    )
+
+    calls: list[dict] = []
+
+    async def fake_mythos_runner(**kwargs):
+        calls.append(kwargs)
+        return VerifySessionResult(
+            kind=OutputKind.DISPOSITION,
+            output_path=kwargs["run_dir"] / "out" / "iter-1" / "verify_disposition.json",
+            parsed=_disposition_for("VULN-001"),
+        )
+
+    def fail_if_used(**kwargs):
+        raise AssertionError(
+            "in-process run_verify_session must not be used for claude-mythos-5"
+        )
+
+    monkeypatch.setattr(
+        verify_module.verify_mythos, "run_skill_mythos", fake_mythos_runner
+    )
+    monkeypatch.setattr(verify_module, "run_verify_session", fail_if_used)
+
+    rc = await verify_module.run_verify(
+        config=mythos_config,
+        issue_urls=["https://github.com/org/repo/issues/42"],
+        commit=None,
+        scratch_base_dir=tmp_path / "verify_runs",
+        no_post=True,
+        no_reopen=True,
+        model_override=None,
+    )
+    assert rc == 0
+    assert len(calls) == 1
+    assert calls[0]["fixed_ids"] == ["VULN-001"]
+
+
 # ---------- body-tampering archival path ------------------------------------
 
 
