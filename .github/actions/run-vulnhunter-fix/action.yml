@@ -15,6 +15,9 @@ inputs:
   model:
     required: false
     default: claude-opus-4-8
+  mythos-retention-acknowledged:
+    required: false
+    default: "false"
   aws-workspace-id:
     required: true
   aws-api-key:
@@ -58,19 +61,20 @@ inputs:
 outputs:
   agent-exit-code:
     description: Exact exit code returned by python -m agent.
-    value: ${{ steps.run.outputs.agent-exit-code }}
+    value: ${{ steps.run-opus.outputs.agent-exit-code || steps.run-mythos.outputs.agent-exit-code }}
   run-directory:
     description: The single contained run directory, when one was created.
-    value: ${{ steps.run.outputs.run-directory }}
+    value: ${{ steps.run-opus.outputs.run-directory || steps.run-mythos.outputs.run-directory }}
   disposition-path:
     description: Expected fix disposition path, when a run directory exists.
-    value: ${{ steps.run.outputs.disposition-path }}
+    value: ${{ steps.run-opus.outputs.disposition-path || steps.run-mythos.outputs.disposition-path }}
 
 runs:
   using: composite
   steps:
     - name: Execute automated fork remediation
-      id: run
+      id: run-opus
+      if: inputs.model != 'claude-mythos-5'
       shell: bash
       env:
         PYTHON_PATH: ${{ inputs.python-path }}
@@ -148,3 +152,34 @@ runs:
           echo "disposition-path=${disposition}"
         } >> "${GITHUB_OUTPUT}"
         exit "${agent_rc}"
+
+    - name: Execute isolated Mythos fix run with gVisor
+      id: run-mythos
+      if: inputs.model == 'claude-mythos-5'
+      shell: bash
+      env:
+        TARGET_REPOSITORY: ${{ inputs.target-url }}
+        MYTHOS_REPORT_DIR: ${{ inputs.report-directory }}
+        MYTHOS_SCRATCH_BASE: ${{ inputs.scratch-base }}
+        MYTHOS_GITHUB_HOST: ${{ inputs.github-host }}
+        MYTHOS_REPO_ROOT: ${{ github.workspace }}
+        MYTHOS_RETENTION_ACKNOWLEDGED: ${{ inputs.mythos-retention-acknowledged }}
+        MYTHOS_TEST_POLICY: ${{ inputs.test-policy }}
+        MYTHOS_DOCKER_RUNTIME: runsc
+        VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
+        VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
+        # This token exists only in this trusted control-plane process, used
+        # solely to clone the target before the gVisor container starts. The
+        # launcher never writes it into the agent env-file or the container.
+        VULNHUNT_GITHUB_FIX_TOKEN: ${{ inputs.fix-token }}
+      run: |
+        set -euo pipefail
+        echo "::add-mask::${VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID}"
+        echo "::add-mask::${VULNHUNT_ANTHROPIC_AWS_API_KEY}"
+        echo "::add-mask::${VULNHUNT_GITHUB_FIX_TOKEN}"
+        [[ "${{ inputs.delivery-enabled }}" == "false" ]] || {
+          echo "::error::claude-mythos-5 fix mode is local-dry-run only; delivery-enabled must be false."
+          exit 1
+        }
+        chmod +x "${GITHUB_ACTION_PATH}/../../../scripts/run_mythos_fix_sandbox.sh"
+        "${GITHUB_ACTION_PATH}/../../../scripts/run_mythos_fix_sandbox.sh"

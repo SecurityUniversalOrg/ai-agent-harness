@@ -40,8 +40,11 @@ Both workflows also expose `workflow_call`, retain the agent's exact process out
 uploading curated evidence, and require protected `vulnhunter-fix` or
 `vulnhunter-verify` environments. See
 [GitHub Actions remediation and verification](../docs/architecture/github-actions-remediation.md).
-They currently accept Opus 4.7/4.8 only: the existing Mythos gVisor launcher is scan-only,
-so fix/verify Mythos automation remains fail-closed until mode-aware staged launchers exist.
+Both accept Opus 4.7, Opus 4.8, and Mythos 5. Selecting Mythos routes the job onto a
+`gvisor`-labeled runner and moves the model turn into a gVisor container that never
+receives a GitHub credential (`scripts/run_mythos_fix_sandbox.sh` /
+`scripts/run_mythos_verify_sandbox.sh`); delivery/posting stays impossible under Mythos
+either way, so there's nothing extra to opt out of.
 
 The agent hardcodes nothing sensitive: every host, credential, and path comes from a
 TOML config file and/or `VULNHUNT_*` environment variables, so the same image runs across

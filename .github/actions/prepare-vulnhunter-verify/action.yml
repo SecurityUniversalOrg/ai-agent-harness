@@ -23,6 +23,10 @@ inputs:
     description: Reviewed verification model.
     required: false
     default: claude-opus-4-8
+  mythos-retention-acknowledged:
+    description: Explicit acknowledgement that Mythos requests have mandatory 30-day retention.
+    required: false
+    default: "false"
   post-comments:
     description: Allow verified disposition comments to be posted.
     required: false
@@ -61,6 +65,7 @@ runs:
         GH_TOKEN: ${{ inputs.verify-token }}
         GITHUB_SERVER_URL_INPUT: ${{ inputs.github-server-url }}
         MODEL: ${{ inputs.model }}
+        MYTHOS_RETENTION_ACKNOWLEDGED: ${{ inputs.mythos-retention-acknowledged }}
         POST_COMMENTS: ${{ inputs.post-comments }}
         REOPEN_NONFIXED: ${{ inputs.reopen-nonfixed }}
       run: |
@@ -71,8 +76,7 @@ runs:
         }
         echo "::add-mask::${GH_TOKEN}"
         case "${MODEL}" in
-          claude-opus-4-7|claude-opus-4-8) ;;
-          claude-mythos-5) echo "::error::Mythos verify requires a dedicated staged-input gVisor launcher; the current launcher is scan-only."; exit 1 ;;
+          claude-opus-4-7|claude-opus-4-8|claude-mythos-5) ;;
           *) echo "::error::Unsupported verify model: ${MODEL}"; exit 1 ;;
         esac
         for toggle in "${POST_COMMENTS}" "${REOPEN_NONFIXED}"; do
@@ -85,6 +89,20 @@ runs:
           echo "::error::reopen-nonfixed=true requires post-comments=true."
           exit 1
         }
+        if [[ "${MODEL}" == "claude-mythos-5" ]]; then
+          [[ "${MYTHOS_RETENTION_ACKNOWLEDGED}" == "true" ]] || {
+            echo "::error::Mythos requires mythos-retention-acknowledged=true (mandatory 30-day retention; no ZDR)."
+            exit 1
+          }
+          # Mythos verify mode never mutates GitHub — the model turn runs inside
+          # a credential-free gVisor container (scripts/run_mythos_verify_sandbox.sh);
+          # enforce_mythos_mode_policy(mode="verify") independently enforces this
+          # in the Python agent. Fail fast here too.
+          [[ "${POST_COMMENTS}" == "false" ]] || {
+            echo "::error::claude-mythos-5 verify mode never posts; post-comments must be false."
+            exit 1
+          }
+        fi
 
         python3 - <<'PY'
         import json

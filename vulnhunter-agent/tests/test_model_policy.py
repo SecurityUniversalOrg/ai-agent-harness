@@ -152,6 +152,53 @@ def test_mythos_requires_runtime_attestation(
         )
 
 
+def test_mythos_verify_skips_base_policy_when_runtime_check_disabled(
+    populated_agent_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """verify's trusted host process does the GitHub fetch/clone outside any
+    gVisor container for every model (see agent/verify_mythos.py) — it is
+    never itself the hardened runtime, so check_runtime_environment=False
+    must let it through even with the runtime marker absent and no retention
+    acknowledgement, while still enforcing the verify-specific no_post/
+    no_reopen gate."""
+    cfg = _mythos_config(populated_agent_config)
+    cfg = replace(cfg, mythos=replace(cfg.mythos, data_retention_acknowledged=False))
+    monkeypatch.delenv(MYTHOS_RUNTIME_MARKER, raising=False)
+
+    # Base-policy checks (retention ack, hardened-runtime marker) are skipped.
+    enforce_mythos_mode_policy(
+        cfg,
+        "claude-mythos-5",
+        mode="verify",
+        no_post=True,
+        no_reopen=True,
+        check_runtime_environment=False,
+    )
+
+    # The verify-mode mutation gate still applies regardless.
+    with pytest.raises(ValueError, match="--no-post"):
+        enforce_mythos_mode_policy(
+            cfg,
+            "claude-mythos-5",
+            mode="verify",
+            no_post=False,
+            no_reopen=True,
+            check_runtime_environment=False,
+        )
+
+
+def test_mythos_fix_still_enforces_base_policy_by_default(
+    populated_agent_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fix's entire process runs inside the container (via --target-checkout),
+    so unlike verify it must keep the default check_runtime_environment=True
+    — the hardened-runtime marker absence must still be fatal."""
+    cfg = _mythos_config(populated_agent_config)
+    monkeypatch.delenv(MYTHOS_RUNTIME_MARKER, raising=False)
+    with pytest.raises(ValueError, match=MYTHOS_RUNTIME_MARKER):
+        enforce_mythos_mode_policy(cfg, "claude-mythos-5", mode="fix", no_post=True)
+
+
 def test_mythos_proxy_cannot_be_redirected(
     populated_agent_config, monkeypatch: pytest.MonkeyPatch
 ) -> None:

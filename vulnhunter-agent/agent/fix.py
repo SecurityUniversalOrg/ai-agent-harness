@@ -409,20 +409,43 @@ async def run_fix(
     no_post: bool,
     test_policy_override: str | None,
     model_override: str | None,
+    target_checkout_override: Path | None = None,
 ) -> int:
-    """Run one unattended fork-mode remediation and return its process exit code."""
+    """Run one unattended fork-mode remediation and return its process exit code.
+
+    ``target_checkout_override``, when supplied, points at a target-repo
+    checkout a trusted caller already cloned (with its own GitHub
+    credential) *before* this process started — for example the host-side
+    control plane in ``scripts/run_mythos_fix_sandbox.sh``, which clones
+    the target outside the gVisor container and then streams only the
+    checkout in. When set, this run performs no GitHub clone of its own and
+    requires no ``[github] scan_token`` at all: the credential never has to
+    exist in whatever process/container is about to hand Bash to the model.
+    Only meaningful with ``no_post=True`` — a pre-staged checkout carries no
+    push/fork/PR credential, so delivery is impossible either way.
+    """
     try:
         target_repo = normalize_target_repo(target_repo, config.github.host)
     except FixInputError as exc:
         logger.error("Invalid fix target: %s", exc)
         return _EXIT_BAD_ARGS
 
-    github_token = get_github_token("scan", config)
-    if not github_token:
+    if target_checkout_override is not None and not no_post:
         logger.error(
-            "[github] scan_token is required for --mode=fix (target/fork/PR/issue access)"
+            "target_checkout_override requires no_post=True: a pre-staged "
+            "checkout carries no credential to deliver with"
         )
-        return _EXIT_AUTH_FAILURE
+        return _EXIT_BAD_ARGS
+
+    github_token = ""
+    if target_checkout_override is None:
+        github_token = get_github_token("scan", config)
+        if not github_token:
+            logger.error(
+                "[github] scan_token is required for --mode=fix (target/fork/PR/issue "
+                "access) unless a pre-staged target checkout is supplied"
+            )
+            return _EXIT_AUTH_FAILURE
 
     try:
         skill_dir = _locate_skill(config)
@@ -446,7 +469,23 @@ async def run_fix(
         return _EXIT_FAILURE
 
     target_checkout: Path | None = None
-    if no_post:
+    if target_checkout_override is not None:
+        resolved_override = target_checkout_override.expanduser()
+        if _is_link_like(resolved_override):
+            logger.error(
+                "--target-checkout must not be a link: %s", resolved_override
+            )
+            return _EXIT_BAD_ARGS
+        resolved_override = resolved_override.resolve()
+        if not resolved_override.is_dir() or not (resolved_override / ".git").exists():
+            logger.error(
+                "--target-checkout must be an existing git checkout directory: %s",
+                resolved_override,
+            )
+            return _EXIT_BAD_ARGS
+        target_checkout = resolved_override
+        logger.info("Using pre-staged target checkout: %s", target_checkout)
+    elif no_post:
         # A dry-run model receives no GitHub credential. Stage the only private
         # network input it needs before starting the SDK session, using a
         # process-local credential helper so the token never enters argv/remotes.

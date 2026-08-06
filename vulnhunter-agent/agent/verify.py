@@ -55,8 +55,10 @@ from ._github_verify import (
 from .auth import TokenProvider, make_token_manager, resolve_verify
 from .config import AgentConfig
 from . import audit as _audit
+from .model_policy import is_mythos_model
 from .repo_properties import RepoProperties
 from .token_client import get_github_token
+from . import verify_mythos
 from .verify_extract import (
     ExtractedMarkers,
     IssueNarrative,
@@ -357,7 +359,18 @@ async def run_verify(
             run_dir=run_dir,
         )
 
-        session_result = await _run_skill(
+        # Every trusted-host step above (fetch, clone, homogeneity, pre-flight)
+        # already ran with the real GitHub credential and is identical for
+        # every model. Only the actual model turn is model-dependent: Mythos
+        # runs it inside a credential-free gVisor container instead of this
+        # process (see agent/verify_mythos.py for why verify can't reuse
+        # fix/scan's simpler "run the whole CLI inside the container" shape).
+        skill_runner = (
+            verify_mythos.run_skill_mythos
+            if is_mythos_model(model_override or config.anthropic.model)
+            else _run_skill
+        )
+        session_result = await skill_runner(
             config=config,
             token_manager=token_manager,
             run_dir=run_dir,

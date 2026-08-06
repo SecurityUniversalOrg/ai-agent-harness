@@ -1545,6 +1545,67 @@ class TestModeDispatchAndFlagRejection:
         assert excinfo.value.code == 2
         assert "exactly two positional" in capsys.readouterr().err
 
+    def test_fix_mode_target_checkout_dispatches(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """--target-checkout parses cleanly for --mode=fix and reaches
+        _amain_fix (which is where it gets resolved to a Path and threaded
+        into fix.run_fix — see test_fix.py for that boundary)."""
+        captured: dict[str, Any] = {}
+
+        async def fake_amain_fix(args: Any) -> int:
+            captured["target_checkout"] = args.target_checkout
+            captured["no_post"] = args.no_post
+            return 0
+
+        monkeypatch.setattr(main_mod, "_amain_fix", fake_amain_fix)
+        rc = main(
+            [
+                "--mode=fix",
+                "https://github.com/org/repo",
+                "/reports/run-1",
+                "--no-post",
+                "--target-checkout",
+                "/pre-staged/checkout",
+            ]
+        )
+        assert rc == 0
+        assert captured == {
+            "target_checkout": "/pre-staged/checkout",
+            "no_post": True,
+        }
+
+    def test_scan_mode_rejects_fix_only_target_checkout(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "--mode=scan",
+                    "https://github.com/o/r",
+                    "--target-checkout",
+                    "/pre-staged/checkout",
+                ]
+            )
+        assert excinfo.value.code == 2
+        assert "fix-mode only" in capsys.readouterr().err
+
+    def test_verify_mode_rejects_fix_only_target_checkout(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "--mode=verify",
+                    "https://github.com/o/r/issues/1",
+                    "--target-checkout",
+                    "/pre-staged/checkout",
+                ]
+            )
+        assert excinfo.value.code == 2
+        assert "cannot be used with --mode=verify" in capsys.readouterr().err
+
     def test_verify_mode_dispatches_to_verify_amain(
         self,
         monkeypatch: pytest.MonkeyPatch,

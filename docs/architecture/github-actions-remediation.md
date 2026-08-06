@@ -27,11 +27,15 @@ For allowed invocations, checkout is pinned to `github.workflow_sha`, not the ca
 `github.sha`. The repository-local composites therefore come from the same immutable
 revision as the workflow definition even when a same-repository caller uses another ref.
 
-This release supports the reviewed Opus 4.7 and Opus 4.8 execution profiles. Mythos is
-rejected during intake. The existing gVisor launcher hardcodes scan mode, while fix and
-verify are currently monolithic Python operations that mix trusted staging or delivery
-with the model session. Enabling Mythos without new mode-aware stage/evaluate/deliver
-contracts would overstate credential and network isolation.
+This release supports the reviewed Opus 4.7, Opus 4.8, and Mythos 5 execution
+profiles. Selecting Mythos routes the model turn — and, for fix, target-repo access
+too — through a gVisor-isolated container that never receives a GitHub credential;
+see [Mythos gVisor execution](#mythos-gvisor-execution) below and the
+[Mythos security profile](mythos-security-profile.md) for the full control and
+failure matrix. Fix and verify each split into a trusted stage (GitHub reads/clones,
+report staging) and a credential-free evaluate step for Mythos specifically — Opus
+still runs as the single monolithic Python operation described in the rest of this
+document.
 
 ## Workflow decomposition
 
@@ -162,6 +166,63 @@ identity in the surrounding process for evidence intake and optional delivery. A
 Mythos design must split this into trusted stage, credential-free gVisor evaluate, and
 trusted deliver phases.
 
+## Mythos gVisor execution
+
+Selecting `model: claude-mythos-5` changes three things in both workflows: the job
+runs on a `gvisor`-labeled runner instead of `ubuntu-latest`, a credential-free
+isolation-proof canary (`scripts/validate_mythos_isolation.sh`, unchanged from scan)
+runs before the mutable stage, and the actual model turn moves inside a gVisor
+container built from the same `Dockerfile.mythos` and `mythos-egress` Squid proxy
+scan already uses. `delivery_enabled` / `post_comments` must be `false` when Mythos
+is selected — enforced redundantly at the workflow's prepare-action gate and, again,
+independently, by `agent.model_policy.enforce_mythos_mode_policy` inside the Python
+agent — so a Mythos run can only ever produce local evidence, never a fork/PR/issue
+or a posted/reopened comment.
+
+Fix and verify reach that container differently, because only fix's GitHub use
+(cloning the target) is a single step that can be pre-staged and handed off wholesale:
+
+- **Fix** (`scripts/run_mythos_fix_sandbox.sh`) clones the target on the trusted
+  runner with the fix token — the same way the non-Mythos path's dry run always
+  has — then builds and launches the container, streams in that checkout and the
+  already-staged report (no re-clone, no token), and runs the *entire*
+  `python -m agent --mode=fix --target-checkout ...` invocation inside via
+  `docker exec`. `--target-checkout` is new: it tells `agent.fix.run_fix` to use a
+  pre-staged checkout directly and skip `get_github_token`/`shallow_clone` entirely,
+  so the container process never needs — and is never given — a GitHub credential.
+  Delivery is impossible either way (`--no-post` is mandatory under Mythos), so
+  there is no separate deliver phase to design around.
+- **Verify** (`scripts/run_mythos_verify_sandbox.sh`) cannot use the same shape:
+  verify's GitHub token drives both the issue/comment/timeline REST+GraphQL fetch
+  *and* the target-repo clone, not just one clone. `python -m agent --mode=verify`
+  therefore keeps running as an ordinary trusted-host process for every model,
+  including Mythos — fetch, clone, homogeneity, and the Haiku cross-repo pre-flight
+  are unaffected. Only the point where that process would start an in-process SDK
+  session (`verify._run_skill`) is swapped: for Mythos, `agent.verify_mythos.
+  run_skill_mythos` renders the same kickoff prompt and `comments.md` from
+  already-fetched, already-credential-free data, then calls the sandbox script to
+  stream those inputs into a container and run the turn there via
+  `agent._mythos_verify_entry`, a small dedicated entrypoint that calls the same
+  `verify_runner.run_verify_session` every other model uses. The disposition streams
+  back out to the exact path the in-process path would have produced it at, so
+  everything downstream (`_verify_entry_count`, audit emission, `_post_dispositions`,
+  `attest-vulnhunter-verify`) is unchanged and model-agnostic. Because verify's
+  trusted-host process is not itself the hardened runtime, it calls
+  `enforce_mythos_mode_policy(..., check_runtime_environment=False)` — the full
+  base-policy check (hardened-runtime marker, pinned proxy, sandbox posture) instead
+  runs once, independently, inside `agent._mythos_verify_entry`.
+
+Both sandbox scripts reuse `scripts/_mythos_docker.sh`'s trusted Docker access helper
+and reproduce the same mechanical isolation assertions as
+`scripts/run_mythos_sandbox.sh` (runsc runtime, read-only root, dropped capabilities,
+no host mounts/devices/socket, and a grep over the container's declared environment
+variable *names* — not values — that fails the run if any GitHub credential variable,
+fix or verify, is present) before ever invoking the model. See
+[Mythos security profile](mythos-security-profile.md) for the full layered-control
+table and residual risks, including the fact that Mythos fix mode can never install a
+new dependency (`fix.allowed_domains` is forbidden under Mythos), so it only suits
+findings whose fix doesn't need one.
+
 ## Secrets and minimum roles
 
 | Secret | Used by | Minimum purpose |
@@ -210,6 +271,22 @@ to 14 days and should be reduced where organizational evidence policy permits.
 3. Leave both mutation toggles false.
 4. Review verdict totals and curated evidence before enabling comments or reopen behavior.
 
+### Mythos dry run (fix or verify)
+
+1. Provision a `gvisor`-labeled runner per
+   [Mythos security profile § GitHub Actions and scale](mythos-security-profile.md#github-actions-and-scale)
+   — Docker with the `runsc` runtime registered, ephemeral/single-job, no persistent
+   workspace.
+2. Select `model: claude-mythos-5` on dispatch and set `mythos_retention_acknowledged:
+   true` — both are required or the prepare step rejects the run before any clone.
+3. Leave `delivery_enabled` / `post_comments` at their `false` default; Mythos rejects
+   any other value.
+4. Review the `Mythos gVisor isolation proof` step summary before trusting the run's
+   evidence — it must show every `ISOLATION_PROOF` line, matching scan's.
+5. For fix, remember the container has no route beyond the Claude Platform endpoint:
+   findings whose fix needs a new dependency will not succeed under Mythos regardless
+   of `fix.allowed_domains` (which is forbidden here anyway). Retry those under Opus.
+
 ### Failure recovery
 
 - Intake failures occur before model execution and should be corrected rather than retried.
@@ -224,12 +301,26 @@ to 14 days and should be reduced where organizational evidence policy permits.
 
 ## Residual risks
 
-- Delivery-enabled fix still places a GitHub credential and Bash in the model process.
+- Delivery-enabled fix under Opus still places a GitHub credential and Bash in the
+  model process — Mythos fix mode does not have this exposure (delivery is
+  impossible under Mythos, and `--target-checkout` means the container it runs in
+  never receives a credential at all), but it is still true whenever Opus is
+  selected with `delivery_enabled=true`.
 - Fix disposition facts are schema/semantics validated but are not yet independently
   reconciled against every remote branch, commit, issue, PR, label, and gate artifact.
-- Verify evidence roots are logically untrusted but not yet mounted mechanically read-only
-  inside a separate container.
+- Verify evidence roots under Opus are logically untrusted but not mounted
+  mechanically read-only inside a separate container — the trusted host process
+  reads them directly. Mythos verify closes this specific gap for the model turn
+  itself (see [Mythos gVisor execution](#mythos-gvisor-execution)), but the
+  fetch/clone/homogeneity/pre-flight code that produces those inputs is identical,
+  and identically un-containerized, for both models.
 - Trusted issue authorship is an organizational provenance control, not a cryptographic
   signature over report markers.
 - Third-party actions are version-tag pinned rather than commit-SHA pinned; production
   deployments should pin reviewed immutable SHAs through dependency policy.
+- The Mythos fix/verify sandbox scripts are new in this change and have not yet been
+  exercised against a live `gvisor`-labeled runner in this repository; the mechanical
+  isolation assertions they share with the proven scan launcher (runsc pinning,
+  read-only root, capability drop, no-credential-in-container grep) are exercised by
+  the isolation-proof canary step, but the fix/verify-specific `docker exec` payloads
+  themselves are covered by unit and static-contract tests, not an end-to-end run.

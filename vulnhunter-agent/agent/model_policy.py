@@ -130,11 +130,28 @@ def enforce_mythos_mode_policy(
     issues: bool = False,
     no_post: bool = False,
     no_reopen: bool = False,
+    check_runtime_environment: bool = True,
 ) -> None:
-    """Apply mode-specific least-privilege constraints for Mythos."""
+    """Apply mode-specific least-privilege constraints for Mythos.
+
+    ``check_runtime_environment`` gates ``enforce_mythos_base_policy`` — the
+    hardened-runtime-marker, pinned-proxy, sandbox, and telemetry checks that
+    only make sense for the process about to actually start a model session
+    inside the Mythos gVisor container. Scan and fix run their *entire*
+    ``python -m agent`` invocation inside that container, so the default
+    (``True``) is correct for them. Verify is different: its GitHub fetch and
+    clone must run in a trusted host process *outside* any container (see
+    ``agent/verify_mythos.py``), and only the model turn itself moves inside
+    a container via a separate entrypoint that performs its own
+    ``enforce_mythos_base_policy`` call. Callers on that split path pass
+    ``check_runtime_environment=False`` so the outer, non-containerized
+    process isn't rejected for not being the hardened runtime it was never
+    meant to be.
+    """
     if not is_mythos_model(model):
         return
-    enforce_mythos_base_policy(config, model)
+    if check_runtime_environment:
+        enforce_mythos_base_policy(config, model)
 
     if mode == "scan":
         if not read_only or enable_bash:

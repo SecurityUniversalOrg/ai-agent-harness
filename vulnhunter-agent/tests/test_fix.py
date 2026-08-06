@@ -256,3 +256,127 @@ async def test_run_fix_dry_run_success(
     )
     assert rc == 0
     assert list((tmp_path / "runs").glob("repo-*"))
+
+
+async def test_run_fix_target_checkout_override_requires_no_post(
+    tmp_path: Path,
+    populated_agent_config,
+) -> None:
+    """A pre-staged checkout carries no push/fork/PR credential either way —
+    reject it outright for a delivery-enabled invocation instead of silently
+    running with a checkout that could never deliver anything."""
+    rc = await fix.run_fix(
+        config=populated_agent_config,
+        target_repo="https://github.com/org/repo",
+        results_input=str(tmp_path / "does-not-matter"),
+        scratch_base_dir=None,
+        no_post=False,
+        test_policy_override=None,
+        model_override=None,
+        target_checkout_override=tmp_path / "checkout",
+    )
+    assert rc == fix._EXIT_BAD_ARGS
+
+
+async def test_run_fix_target_checkout_override_skips_clone_and_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    populated_agent_config,
+) -> None:
+    """A Mythos-style caller supplies an already-cloned checkout and no scan
+    token at all — run_fix must use it directly rather than calling
+    shallow_clone or requiring [github] scan_token."""
+    report_source = tmp_path / "input-report"
+    report_source.mkdir()
+    (report_source / "README.md").write_text("# report", encoding="utf-8")
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "## Automated agent execution profile\nVULNFIX_CONFIG_PATH\n",
+        encoding="utf-8",
+    )
+    checkout = tmp_path / "pre-staged-checkout"
+    (checkout / ".git").mkdir(parents=True)
+
+    config = dataclasses.replace(
+        populated_agent_config,
+        # Deliberately empty — target_checkout_override must make this a
+        # non-issue rather than tripping the usual auth-failure exit.
+        github=dataclasses.replace(populated_agent_config.github, scan_token=""),
+        fix=dataclasses.replace(
+            populated_agent_config.fix,
+            scratch_base_dir=str(tmp_path / "runs"),
+            skill_dir=str(skill),
+        ),
+    )
+
+    async def fake_session(**kwargs):
+        report = kwargs["cwd"] / "report"
+        output_path = kwargs["out_dir"] / "fix_disposition.json"
+        payload = _disposition(report)
+        output_path.write_text(json.dumps(payload), encoding="utf-8")
+        return FixSessionResult(
+            kind=FixOutputKind.DISPOSITION,
+            output_path=output_path,
+            parsed=payload,
+        )
+
+    monkeypatch.setattr(fix, "run_fix_session", fake_session)
+
+    def fail_if_cloned(*args, **kwargs):
+        raise AssertionError("shallow_clone must not be called with a pre-staged checkout")
+
+    monkeypatch.setattr(fix, "shallow_clone", fail_if_cloned)
+    monkeypatch.setattr(
+        fix,
+        "make_token_manager",
+        lambda *args, **kwargs: SimpleNamespace(get_valid_token=lambda: "llm-token"),
+    )
+
+    rc = await fix.run_fix(
+        config=config,
+        target_repo="https://github.com/org/repo",
+        results_input=str(report_source),
+        scratch_base_dir=None,
+        no_post=True,
+        test_policy_override=None,
+        model_override=None,
+        target_checkout_override=checkout,
+    )
+    assert rc == 0
+
+
+async def test_run_fix_target_checkout_override_rejects_non_git_directory(
+    tmp_path: Path,
+    populated_agent_config,
+) -> None:
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "## Automated agent execution profile\nVULNFIX_CONFIG_PATH\n",
+        encoding="utf-8",
+    )
+    report_source = tmp_path / "input-report"
+    report_source.mkdir()
+    (report_source / "README.md").write_text("# report", encoding="utf-8")
+    config = dataclasses.replace(
+        populated_agent_config,
+        fix=dataclasses.replace(
+            populated_agent_config.fix,
+            scratch_base_dir=str(tmp_path / "runs"),
+            skill_dir=str(skill),
+        ),
+    )
+    not_a_checkout = tmp_path / "just-a-dir"
+    not_a_checkout.mkdir()
+    rc = await fix.run_fix(
+        config=config,
+        target_repo="https://github.com/org/repo",
+        results_input=str(report_source),
+        scratch_base_dir=None,
+        no_post=True,
+        test_policy_override=None,
+        model_override=None,
+        target_checkout_override=not_a_checkout,
+    )
+    assert rc == fix._EXIT_BAD_ARGS

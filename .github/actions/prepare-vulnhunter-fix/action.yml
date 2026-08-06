@@ -22,6 +22,10 @@ inputs:
     description: Reviewed remediation model.
     required: false
     default: claude-opus-4-8
+  mythos-retention-acknowledged:
+    description: Explicit acknowledgement that Mythos requests have mandatory 30-day retention.
+    required: false
+    default: "false"
   delivery-enabled:
     description: Permit the agent's private-fork issue and PR delivery path.
     required: false
@@ -77,6 +81,7 @@ runs:
         RESULTS_PATH: ${{ inputs.results-path }}
         REPORTS_TOKEN: ${{ inputs.reports-token }}
         MODEL: ${{ inputs.model }}
+        MYTHOS_RETENTION_ACKNOWLEDGED: ${{ inputs.mythos-retention-acknowledged }}
         DELIVERY_ENABLED: ${{ inputs.delivery-enabled }}
         TEST_POLICY: ${{ inputs.test-policy }}
         ALLOWED_DOMAINS: ${{ inputs.allowed-domains }}
@@ -118,14 +123,29 @@ runs:
           exit 1
         }
         case "${MODEL}" in
-          claude-opus-4-7|claude-opus-4-8) ;;
-          claude-mythos-5) echo "::error::Mythos fix requires a dedicated mode-aware gVisor launcher; the current launcher is scan-only."; exit 1 ;;
+          claude-opus-4-7|claude-opus-4-8|claude-mythos-5) ;;
           *) echo "::error::Unsupported fix model: ${MODEL}"; exit 1 ;;
         esac
         [[ "${DELIVERY_ENABLED}" == "true" || "${DELIVERY_ENABLED}" == "false" ]] || {
           echo "::error::delivery-enabled must be exactly true or false."
           exit 1
         }
+        if [[ "${MODEL}" == "claude-mythos-5" ]]; then
+          [[ "${MYTHOS_RETENTION_ACKNOWLEDGED}" == "true" ]] || {
+            echo "::error::Mythos requires mythos-retention-acknowledged=true (mandatory 30-day retention; no ZDR)."
+            exit 1
+          }
+          # Mythos fix mode always runs inside a gVisor container with no GitHub
+          # credential and no route to GitHub — see run-vulnhunter-fix and
+          # scripts/run_mythos_fix_sandbox.sh. The Python agent independently
+          # enforces this via enforce_mythos_mode_policy(mode="fix"); this is a
+          # fail-fast duplicate so a misconfigured dispatch never reaches the
+          # expensive clone/sandbox-build steps.
+          [[ "${DELIVERY_ENABLED}" == "false" ]] || {
+            echo "::error::claude-mythos-5 fix mode is local-dry-run only; delivery-enabled must be false."
+            exit 1
+          }
+        fi
         case "${TEST_POLICY}" in best-effort|must-pass|skip) ;; *) echo "::error::Unsupported test-policy."; exit 1 ;; esac
         [[ -z "${FORK_ORG}" || "${FORK_ORG}" =~ ^[A-Za-z0-9_.-]+$ ]] || {
           echo "::error::fork-org contains unsupported characters."
