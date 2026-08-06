@@ -1,0 +1,150 @@
+name: Run VulnHunter Fix
+description: Executes one contained automated fix run and preserves its exact process outcome.
+
+inputs:
+  python-path:
+    required: true
+  config-path:
+    required: true
+  target-url:
+    required: true
+  report-directory:
+    required: true
+  scratch-base:
+    required: true
+  model:
+    required: false
+    default: claude-opus-4-8
+  aws-workspace-id:
+    required: true
+  aws-api-key:
+    required: true
+  fix-token:
+    required: true
+  delivery-enabled:
+    required: false
+    default: "false"
+  test-policy:
+    required: false
+    default: best-effort
+  fork-org:
+    required: false
+    default: ""
+  fork-prefix:
+    required: false
+    default: vulnhunter-fix
+  base-branch:
+    required: false
+    default: main
+  draft-pr:
+    required: false
+    default: "true"
+  pr-labels:
+    required: false
+    default: security,vulnhunter-fix
+  collaborators:
+    required: false
+    default: ""
+  allowed-domains:
+    required: false
+    default: ""
+  keep-workdir:
+    required: false
+    default: "true"
+
+  github-host:
+    description: GitHub hostname or hostname:port for agent URL and API policy.
+    required: true
+outputs:
+  agent-exit-code:
+    description: Exact exit code returned by python -m agent.
+    value: ${{ steps.run.outputs.agent-exit-code }}
+  run-directory:
+    description: The single contained run directory, when one was created.
+    value: ${{ steps.run.outputs.run-directory }}
+  disposition-path:
+    description: Expected fix disposition path, when a run directory exists.
+    value: ${{ steps.run.outputs.disposition-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Execute automated fork remediation
+      id: run
+      shell: bash
+      env:
+        PYTHON_PATH: ${{ inputs.python-path }}
+        CONFIG_PATH: ${{ inputs.config-path }}
+        TARGET_URL: ${{ inputs.target-url }}
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        SCRATCH_BASE: ${{ inputs.scratch-base }}
+        MODEL: ${{ inputs.model }}
+        DELIVERY_ENABLED: ${{ inputs.delivery-enabled }}
+        TEST_POLICY: ${{ inputs.test-policy }}
+        VULNHUNT_ANTHROPIC_AUTH_MODE: anthropic_aws
+        VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
+        VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
+        VULNHUNT_ANTHROPIC_AWS_REGION: us-east-1
+        VULNHUNT_ANTHROPIC_MODEL: ${{ inputs.model }}
+        VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.fix-token }}
+        VULNHUNT_GITHUB_HOST: ${{ inputs.github-host }}
+        VULNHUNT_GITHUB_REPORTS_TOKEN: ""
+        VULNHUNT_FIX_FORK_ORG: ${{ inputs.fork-org }}
+        VULNHUNT_FIX_FORK_PREFIX: ${{ inputs.fork-prefix }}
+        VULNHUNT_FIX_DEFAULT_BASE_BRANCH: ${{ inputs.base-branch }}
+        VULNHUNT_FIX_PR_DRAFT: ${{ inputs.draft-pr }}
+        VULNHUNT_FIX_PR_LABELS: ${{ inputs.pr-labels }}
+        VULNHUNT_FIX_COLLABORATORS: ${{ inputs.collaborators }}
+        VULNHUNT_FIX_ALLOWED_DOMAINS: ${{ inputs.allowed-domains }}
+        VULNHUNT_FIX_KEEP_WORKDIR: ${{ inputs.keep-workdir }}
+        VULNHUNT_FIX_TEST_POLICY: ${{ inputs.test-policy }}
+        VULNHUNT_SANDBOX_ENABLED: "true"
+        VULNHUNT_SANDBOX_FAIL_IF_UNAVAILABLE: "true"
+        VULNHUNT_SANDBOX_ALLOW_UNSANDBOXED_COMMANDS: "false"
+        VULNHUNT_TELEMETRY_ENABLED: "false"
+        PYTHONUNBUFFERED: "1"
+      run: |
+        set -euo pipefail
+
+        echo "::add-mask::${VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID}"
+        echo "::add-mask::${VULNHUNT_ANTHROPIC_AWS_API_KEY}"
+        echo "::add-mask::${VULNHUNT_GITHUB_SCAN_TOKEN}"
+        [[ -x "${PYTHON_PATH}" && -f "${CONFIG_PATH}" && -d "${REPORT_DIRECTORY}" && -d "${SCRATCH_BASE}" ]] || {
+          echo "::error::Fix execution received an invalid prepared path."
+          exit 64
+        }
+
+        post_args=(--no-post)
+        [[ "${DELIVERY_ENABLED}" == "true" ]] && post_args=()
+
+        set +e
+        "${PYTHON_PATH}" -m agent \
+          --mode=fix \
+          --config "${CONFIG_PATH}" \
+          --model "${MODEL}" \
+          --scratch-dir "${SCRATCH_BASE}" \
+          --test-policy "${TEST_POLICY}" \
+          "${post_args[@]}" \
+          "${TARGET_URL}" \
+          "${REPORT_DIRECTORY}"
+        agent_rc=$?
+        set -e
+
+        mapfile -d '' run_dirs < <(find "${SCRATCH_BASE}" -mindepth 1 -maxdepth 1 -type d -print0)
+        run_dir=""
+        disposition=""
+        if (( ${#run_dirs[@]} == 1 )); then
+          run_dir="$(realpath -e "${run_dirs[0]}")"
+          case "${run_dir}" in "$(realpath -e "${SCRATCH_BASE}")"/*) ;; *) echo "::error::Fix run escaped its scratch base."; exit 1 ;; esac
+          disposition="${run_dir}/out/fix_disposition.json"
+        elif (( ${#run_dirs[@]} > 1 )); then
+          echo "::error::Fix execution created multiple run directories."
+          agent_rc=1
+        fi
+
+        {
+          echo "agent-exit-code=${agent_rc}"
+          echo "run-directory=${run_dir}"
+          echo "disposition-path=${disposition}"
+        } >> "${GITHUB_OUTPUT}"
+        exit "${agent_rc}"

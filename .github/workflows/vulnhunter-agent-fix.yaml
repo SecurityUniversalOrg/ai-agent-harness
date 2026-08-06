@@ -1,0 +1,236 @@
+name: VulnHunter Agent Fix
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repository:
+        description: Target repository in owner/name form
+        required: true
+        type: string
+      reports_repository:
+        description: Repository containing the selected VulnHunter report
+        required: true
+        type: string
+      reports_ref:
+        description: Branch, tag, or commit containing the selected report
+        required: false
+        default: main
+        type: string
+      results_path:
+        description: Exact *_VULNHUNT_RESULTS_* directory in the reports repository
+        required: true
+        type: string
+      model:
+        description: Reviewed remediation model
+        required: true
+        default: claude-opus-4-8
+        type: choice
+        options:
+          - claude-opus-4-7
+          - claude-opus-4-8
+      delivery_enabled:
+        description: Permit private-fork issues and PR delivery
+        required: false
+        default: false
+        type: boolean
+      test_policy:
+        description: Regression-suite policy
+        required: true
+        default: best-effort
+        type: choice
+        options:
+          - best-effort
+          - must-pass
+          - skip
+      artifact_retention_days:
+        description: Sensitive remediation artifact retention
+        required: false
+        default: 14
+        type: number
+      timeout_minutes:
+        description: Job timeout
+        required: false
+        default: 180
+        type: number
+  workflow_call:
+    inputs:
+      target_repository:
+        required: true
+        type: string
+      reports_repository:
+        required: true
+        type: string
+      reports_ref:
+        required: false
+        default: main
+        type: string
+      results_path:
+        required: true
+        type: string
+      model:
+        required: false
+        default: claude-opus-4-8
+        type: string
+      delivery_enabled:
+        required: false
+        default: false
+        type: boolean
+      test_policy:
+        required: false
+        default: best-effort
+        type: string
+      artifact_retention_days:
+        required: false
+        default: 14
+        type: number
+      timeout_minutes:
+        required: false
+        default: 180
+        type: number
+    outputs:
+      run_status:
+        description: Validated fix disposition status.
+        value: ${{ jobs.fix.outputs.run-status }}
+      findings_count:
+        description: Number of findings in the disposition.
+        value: ${{ jobs.fix.outputs.findings-count }}
+    secrets:
+      ANTHROPIC_AWS_WORKSPACE_ID:
+        required: true
+      ANTHROPIC_AWS_API_KEY:
+        required: true
+      VULNHUNT_GITHUB_FIX_TOKEN:
+        required: true
+      VULNHUNT_GITHUB_REPORTS_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: vulnhunter-fix-${{ inputs.target_repository }}
+  cancel-in-progress: false
+
+jobs:
+  fix:
+    name: Fix ${{ inputs.target_repository }}
+    runs-on: ${{ vars.VULNHUNT_FIX_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    environment: vulnhunter-fix
+    outputs:
+      run-status: ${{ steps.attest.outputs.run-status }}
+      findings-count: ${{ steps.attest.outputs.findings-count }}
+
+    steps:
+      - name: Enforce trusted same-repository workflow invocation
+        if: ${{ !startsWith(github.workflow_ref, format('{0}/', github.repository)) }}
+        shell: bash
+        run: |
+          echo "Cross-repository workflow_call is not supported because this workflow executes local composite actions." >&2
+          exit 64
+
+      - name: Checkout trusted workflow repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up VulnHunter agent
+        id: setup
+        uses: ./.github/actions/setup-vulnhunter-agent
+        with:
+          python-version: "3.12"
+          working-directory: vulnhunter-agent
+          config-path: vulnhunter-agent/agent/config.example.toml
+          install-skills: "true"
+
+      - name: Validate policy and stage exact report
+        id: prepare
+        uses: ./.github/actions/prepare-vulnhunter-fix
+        with:
+          target-repository: ${{ inputs.target_repository }}
+          reports-repository: ${{ inputs.reports_repository }}
+          reports-ref: ${{ inputs.reports_ref }}
+          results-path: ${{ inputs.results_path }}
+          reports-token: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+          model: ${{ inputs.model }}
+          delivery-enabled: ${{ inputs.delivery_enabled }}
+          test-policy: ${{ inputs.test_policy }}
+          allowed-domains: ${{ vars.VULNHUNT_FIX_ALLOWED_DOMAINS }}
+          fork-org: ${{ vars.VULNHUNT_FIX_FORK_ORG }}
+          github-server-url: ${{ github.server_url }}
+
+      - name: Run automated fix
+        id: fix
+        continue-on-error: true
+        uses: ./.github/actions/run-vulnhunter-fix
+        with:
+          python-path: ${{ steps.setup.outputs.python-path }}
+          config-path: ${{ steps.setup.outputs.config-path }}
+          github-host: ${{ steps.prepare.outputs.github-host }}
+          target-url: ${{ steps.prepare.outputs.target-url }}
+          report-directory: ${{ steps.prepare.outputs.report-directory }}
+          scratch-base: ${{ steps.prepare.outputs.scratch-base }}
+          model: ${{ inputs.model }}
+          aws-workspace-id: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
+          aws-api-key: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
+          fix-token: ${{ secrets.VULNHUNT_GITHUB_FIX_TOKEN }}
+          delivery-enabled: ${{ inputs.delivery_enabled }}
+          test-policy: ${{ inputs.test_policy }}
+          fork-org: ${{ vars.VULNHUNT_FIX_FORK_ORG }}
+          allowed-domains: ${{ vars.VULNHUNT_FIX_ALLOWED_DOMAINS }}
+
+      - name: Attest fix disposition
+        id: attest
+        if: always() && steps.fix.outputs.run-directory != ''
+        continue-on-error: true
+        uses: ./.github/actions/attest-vulnhunter-fix
+        with:
+          python-path: ${{ steps.setup.outputs.python-path }}
+          run-directory: ${{ steps.fix.outputs.run-directory }}
+          disposition-path: ${{ steps.fix.outputs.disposition-path }}
+          agent-exit-code: ${{ steps.fix.outputs.agent-exit-code }}
+          target-url: ${{ steps.prepare.outputs.target-url }}
+          report-directory: ${{ steps.prepare.outputs.report-directory }}
+          delivery-enabled: ${{ inputs.delivery_enabled }}
+
+      - name: Package curated fix evidence
+        id: package
+        if: always()
+        continue-on-error: true
+        uses: ./.github/actions/package-vulnhunter-run
+        with:
+          mode: fix
+          run-directory: ${{ steps.fix.outputs.run-directory }}
+          agent-exit-code: ${{ steps.fix.outputs.agent-exit-code || 'not-started' }}
+
+      - name: Upload sensitive fix evidence
+        id: upload
+        if: always() && steps.package.outputs.package-directory != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulnhunter-fix-${{ steps.prepare.outputs.target-key || github.run_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.package.outputs.package-directory }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+      - name: Enforce fix workflow outcome
+        if: always()
+        shell: bash
+        env:
+          SETUP_OUTCOME: ${{ steps.setup.outcome }}
+          PREPARE_OUTCOME: ${{ steps.prepare.outcome }}
+          FIX_OUTCOME: ${{ steps.fix.outcome }}
+          ATTEST_OUTCOME: ${{ steps.attest.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        run: |
+          set -euo pipefail
+          for outcome in "${SETUP_OUTCOME}" "${PREPARE_OUTCOME}" "${FIX_OUTCOME}" "${ATTEST_OUTCOME}" "${PACKAGE_OUTCOME}" "${UPLOAD_OUTCOME}"; do
+            [[ "${outcome}" == "success" ]] || {
+              echo "::error::VulnHunter fix did not complete every trusted workflow stage."
+              exit 1
+            }
+          done

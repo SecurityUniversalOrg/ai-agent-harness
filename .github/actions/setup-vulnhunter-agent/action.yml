@@ -1,0 +1,91 @@
+name: Set Up VulnHunter Agent
+description: Installs the reviewed skills and an isolated Python runtime without persisting credentials.
+
+inputs:
+  python-version:
+    description: Python version used by the agent.
+    required: false
+    default: "3.12"
+  working-directory:
+    description: Repository-relative directory containing the VulnHunter agent package.
+    required: false
+    default: vulnhunter-agent
+  config-path:
+    description: Repository-relative trusted TOML configuration file.
+    required: false
+    default: vulnhunter-agent/agent/config.example.toml
+  install-skills:
+    description: Install the repository's Claude skills into the runner user profile.
+    required: false
+    default: "true"
+
+outputs:
+  python-path:
+    description: Absolute path to the run-scoped virtual-environment Python executable.
+    value: ${{ steps.setup.outputs.python-path }}
+  agent-directory:
+    description: Absolute path to the agent package directory.
+    value: ${{ steps.setup.outputs.agent-directory }}
+  config-path:
+    description: Absolute path to the trusted agent configuration.
+    value: ${{ steps.setup.outputs.config-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install reviewed Claude skills
+      if: inputs.install-skills == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        installer="${GITHUB_ACTION_PATH}/../../../install.sh"
+        [[ -f "${installer}" && ! -L "${installer}" ]] || {
+          echo "::error::The repository skill installer is missing or symlinked."
+          exit 1
+        }
+        chmod +x "${installer}"
+        "${installer}"
+
+    - name: Create isolated agent environment
+      id: setup
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        CONFIG_PATH: ${{ inputs.config-path }}
+        INSTALL_SKILLS: ${{ inputs.install-skills }}
+      run: |
+        set -euo pipefail
+
+        for toggle in "${INSTALL_SKILLS}"; do
+          [[ "${toggle}" == "true" || "${toggle}" == "false" ]] || {
+            echo "::error::install-skills must be exactly true or false."
+            exit 1
+          }
+        done
+
+        workspace="$(realpath -e "${GITHUB_WORKSPACE}")"
+        agent_dir="$(realpath -e "${GITHUB_WORKSPACE}/${WORKING_DIRECTORY}")"
+        config_path="$(realpath -e "${GITHUB_WORKSPACE}/${CONFIG_PATH}")"
+        case "${agent_dir}" in "${workspace}"/*) ;; *) echo "::error::working-directory escapes the workspace."; exit 1 ;; esac
+        case "${config_path}" in "${workspace}"/*) ;; *) echo "::error::config-path escapes the workspace."; exit 1 ;; esac
+        [[ -f "${agent_dir}/pyproject.toml" && -f "${config_path}" && ! -L "${config_path}" ]] || {
+          echo "::error::The agent package or trusted configuration is missing."
+          exit 1
+        }
+
+        venv="${RUNNER_TEMP}/vulnhunter-agent-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        python3 -m venv "${venv}"
+        python_path="${venv}/bin/python"
+        "${python_path}" -m pip install --disable-pip-version-check -e "${agent_dir}"
+        "${python_path}" -c 'import agent, jsonschema; print("VulnHunter agent import check passed")'
+
+        {
+          echo "python-path=${python_path}"
+          echo "agent-directory=${agent_dir}"
+          echo "config-path=${config_path}"
+        } >> "${GITHUB_OUTPUT}"

@@ -1,0 +1,185 @@
+name: Prepare VulnHunter Verify
+description: Validates issue provenance and emits an argv-safe homogeneous verify intake.
+
+inputs:
+  issue-urls-json:
+    description: JSON array of one or more full GitHub issue URLs.
+    required: true
+  trusted-issue-authors:
+    description: Comma-separated scanner bot or GitHub App logins allowed to author finding issues.
+    required: true
+  expected-repository:
+    description: Optional required owner/name repository scope.
+    required: false
+    default: ""
+  verify-token:
+    description: Token used by the trusted intake and verify orchestrator.
+    required: true
+  github-server-url:
+    description: Trusted GitHub web origin.
+    required: false
+    default: https://github.com
+  model:
+    description: Reviewed verification model.
+    required: false
+    default: claude-opus-4-8
+  post-comments:
+    description: Allow verified disposition comments to be posted.
+    required: false
+    default: "false"
+  reopen-nonfixed:
+    description: Allow non-fixed findings to be reopened; requires post-comments.
+    required: false
+    default: "false"
+
+outputs:
+  issue-urls-json:
+    description: Canonical compact JSON issue list.
+    value: ${{ steps.intake.outputs.issue-urls-json }}
+  target-repository:
+    description: Homogeneous owner/name target repository.
+    value: ${{ steps.intake.outputs.target-repository }}
+  target-key:
+    description: Artifact-safe target identifier.
+    value: ${{ steps.intake.outputs.target-key }}
+  issue-count:
+    value: ${{ steps.intake.outputs.issue-count }}
+
+  github-host:
+    description: Canonical GitHub hostname or hostname:port used by the agent.
+    value: ${{ steps.intake.outputs.github-host }}
+runs:
+  using: composite
+  steps:
+    - name: Validate trusted issue intake
+      id: intake
+      shell: bash
+      env:
+        ISSUE_URLS_JSON: ${{ inputs.issue-urls-json }}
+        TRUSTED_ISSUE_AUTHORS: ${{ inputs.trusted-issue-authors }}
+        EXPECTED_REPOSITORY: ${{ inputs.expected-repository }}
+        GH_TOKEN: ${{ inputs.verify-token }}
+        GITHUB_SERVER_URL_INPUT: ${{ inputs.github-server-url }}
+        MODEL: ${{ inputs.model }}
+        POST_COMMENTS: ${{ inputs.post-comments }}
+        REOPEN_NONFIXED: ${{ inputs.reopen-nonfixed }}
+      run: |
+        set -euo pipefail
+        [[ -n "${GH_TOKEN}" && "${GH_TOKEN}" != *$'\n'* && "${GH_TOKEN}" != *$'\r'* ]] || {
+          echo "::error::verify-token must be a non-empty single-line value."
+          exit 1
+        }
+        echo "::add-mask::${GH_TOKEN}"
+        case "${MODEL}" in
+          claude-opus-4-7|claude-opus-4-8) ;;
+          claude-mythos-5) echo "::error::Mythos verify requires a dedicated staged-input gVisor launcher; the current launcher is scan-only."; exit 1 ;;
+          *) echo "::error::Unsupported verify model: ${MODEL}"; exit 1 ;;
+        esac
+        for toggle in "${POST_COMMENTS}" "${REOPEN_NONFIXED}"; do
+          [[ "${toggle}" == "true" || "${toggle}" == "false" ]] || {
+            echo "::error::Verify mutation controls must be exactly true or false."
+            exit 1
+          }
+        done
+        [[ "${REOPEN_NONFIXED}" != "true" || "${POST_COMMENTS}" == "true" ]] || {
+          echo "::error::reopen-nonfixed=true requires post-comments=true."
+          exit 1
+        }
+
+        python3 - <<'PY'
+        import json
+        import os
+        import re
+        import subprocess
+        from pathlib import Path
+        from urllib.parse import urlparse
+
+        try:
+            issue_urls = json.loads(os.environ["ISSUE_URLS_JSON"])
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"issue-urls-json is not valid JSON: {exc}")
+        if not isinstance(issue_urls, list) or not issue_urls or len(issue_urls) > 100:
+            raise SystemExit("issue-urls-json must contain between 1 and 100 URLs")
+        if not all(isinstance(value, str) and value for value in issue_urls):
+            raise SystemExit("Every issue URL must be a non-empty string")
+
+        origin = urlparse(os.environ["GITHUB_SERVER_URL_INPUT"])
+        if (
+            origin.scheme != "https"
+            or not origin.hostname
+            or origin.path not in ("", "/")
+            or origin.username
+            or origin.password
+            or origin.query
+            or origin.fragment
+        ):
+            raise SystemExit("github-server-url must be an HTTPS origin without a path")
+        hostname = origin.hostname.lower()
+        github_host = origin.netloc.lower()
+        trusted = {
+            value.strip().lower()
+            for value in os.environ["TRUSTED_ISSUE_AUTHORS"].split(",")
+            if value.strip()
+        }
+        if not trusted:
+            raise SystemExit("trusted-issue-authors must name at least one scanner identity")
+        expected = os.environ["EXPECTED_REPOSITORY"].strip().lower()
+        if expected and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", expected):
+            raise SystemExit("expected-repository must use owner/name syntax")
+
+        canonical = []
+        repository = None
+        seen = set()
+        for raw in issue_urls:
+            if any(char in raw for char in "\r\n\x00"):
+                raise SystemExit("Issue URLs must not contain control characters")
+            parsed = urlparse(raw)
+            if (
+                parsed.scheme != "https"
+                or (parsed.hostname or "").lower() != hostname
+                or parsed.port != origin.port
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise SystemExit("Every issue URL must use the configured HTTPS GitHub host")
+            match = re.fullmatch(r"/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(?:issues|pull|pulls)/([1-9][0-9]*)/?", parsed.path)
+            if not match:
+                raise SystemExit(f"Unsupported issue URL shape: {raw}")
+            owner, repo, number = match.groups()
+            slug = f"{owner}/{repo}".lower()
+            if repository is None:
+                repository = slug
+            elif slug != repository:
+                raise SystemExit("All verify issue URLs must belong to one repository")
+            if expected and slug != expected:
+                raise SystemExit("Issue URL is outside expected-repository")
+            key = (slug, number)
+            if key in seen:
+                raise SystemExit("Duplicate issue URL in verify intake")
+            seen.add(key)
+
+            completed = subprocess.run(
+                ["gh", "api", "--hostname", github_host, f"repos/{owner}/{repo}/issues/{number}"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            issue = json.loads(completed.stdout)
+            author = str((issue.get("user") or {}).get("login") or "").lower()
+            if author not in trusted:
+                raise SystemExit(f"Issue {owner}/{repo}#{number} was not authored by a trusted scanner identity")
+            if issue.get("state") != "closed":
+                raise SystemExit(f"Issue {owner}/{repo}#{number} is not closed")
+            canonical.append(f"https://{github_host}/{owner}/{repo}/issues/{number}")
+
+        assert repository is not None
+        compact = json.dumps(canonical, separators=(",", ":"))
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+            output.write(f"issue-urls-json={compact}\n")
+            output.write(f"target-repository={repository}\n")
+            output.write(f"github-host={github_host}\n")
+            output.write(f"target-key={repository.replace('/', '-')}\n")
+            output.write(f"issue-count={len(canonical)}\n")
+        PY

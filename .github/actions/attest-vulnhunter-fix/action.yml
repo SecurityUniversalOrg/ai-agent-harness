@@ -1,0 +1,116 @@
+name: Attest VulnHunter Fix
+description: Independently validates the fix disposition and trusted run identity without credentials.
+
+inputs:
+  python-path:
+    required: true
+  run-directory:
+    required: true
+  disposition-path:
+    required: true
+  agent-exit-code:
+    required: true
+  target-url:
+    required: true
+  report-directory:
+    required: true
+  delivery-enabled:
+    required: false
+    default: "false"
+
+outputs:
+  run-status:
+    value: ${{ steps.attest.outputs.run-status }}
+  findings-count:
+    value: ${{ steps.attest.outputs.findings-count }}
+  attestation-path:
+    value: ${{ steps.attest.outputs.attestation-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate fix disposition
+      id: attest
+      shell: bash
+      env:
+        PYTHON_PATH: ${{ inputs.python-path }}
+        RUN_DIRECTORY: ${{ inputs.run-directory }}
+        DISPOSITION_PATH: ${{ inputs.disposition-path }}
+        AGENT_EXIT_CODE: ${{ inputs.agent-exit-code }}
+        TARGET_URL: ${{ inputs.target-url }}
+        REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        DELIVERY_ENABLED: ${{ inputs.delivery-enabled }}
+      run: |
+        set -euo pipefail
+        [[ -n "${RUN_DIRECTORY}" && -n "${DISPOSITION_PATH}" ]] || {
+          echo "::error::The fix process did not create one attestable run directory."
+          exit 1
+        }
+
+        "${PYTHON_PATH}" - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        from agent.fix import _validate_semantics
+        from agent.fix_runner import FixOutputKind, classify_output
+
+        run_dir = Path(os.environ["RUN_DIRECTORY"]).resolve(strict=True)
+        disposition = Path(os.environ["DISPOSITION_PATH"])
+        source_report = Path(os.environ["REPORT_DIRECTORY"]).resolve(strict=True)
+        staged_report = (run_dir / "report").resolve(strict=True)
+        if run_dir not in staged_report.parents or staged_report.is_symlink():
+            raise SystemExit("Staged fix report escapes the run directory")
+        target = os.environ["TARGET_URL"]
+        delivery = os.environ["DELIVERY_ENABLED"] == "true"
+        agent_rc = int(os.environ["AGENT_EXIT_CODE"])
+
+        resolved_disposition = disposition.resolve(strict=True)
+        if run_dir not in resolved_disposition.parents:
+            raise SystemExit("Disposition path escapes the fix run directory")
+        if disposition.is_symlink() or not disposition.is_file():
+            raise SystemExit("Fix disposition is not a regular non-symlink file")
+
+        result = classify_output(disposition.parent)
+        if result.kind is not FixOutputKind.DISPOSITION or result.parsed is None:
+            raise SystemExit(result.error_detail or "Fix disposition validation failed")
+        semantic_error = _validate_semantics(
+            result.parsed,
+            target_repo=target,
+            report=staged_report,
+            delivery_enabled=delivery,
+        )
+        if semantic_error:
+            raise SystemExit(semantic_error)
+
+        status = str(result.parsed["run_status"])
+        expected_rc = 0 if status in {"COMPLETED", "DRY_RUN", "NO_FINDINGS"} else 5 if status == "PARTIAL" else 1
+        if agent_rc != expected_rc:
+            raise SystemExit(f"Agent exit code {agent_rc} is inconsistent with run_status {status}")
+
+        attestation = {
+            "schema_version": 1,
+            "mode": "fix",
+            "agent_exit_code": agent_rc,
+            "run_status": status,
+            "findings_count": len(result.parsed["findings"]),
+            "delivery_enabled": delivery,
+            "target_repo": target,
+            "report_id": source_report.name,
+        }
+        attestation_path = disposition.parent / "workflow_attestation.json"
+        attestation_path.write_text(json.dumps(attestation, indent=2) + "\n", encoding="utf-8")
+
+        output = Path(os.environ["GITHUB_OUTPUT"])
+        with output.open("a", encoding="utf-8") as fh:
+            fh.write(f"run-status={status}\n")
+            fh.write(f"findings-count={len(result.parsed['findings'])}\n")
+            fh.write(f"attestation-path={attestation_path}\n")
+
+        summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+        with summary.open("a", encoding="utf-8") as fh:
+            fh.write("### VulnHunter fix attestation\n\n")
+            fh.write(f"- Status: `{status}`\n")
+            fh.write(f"- Findings: `{len(result.parsed['findings'])}`\n")
+            fh.write(f"- Delivery enabled: `{str(delivery).lower()}`\n")
+        PY

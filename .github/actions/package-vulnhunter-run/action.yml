@@ -1,0 +1,110 @@
+name: Package VulnHunter Run
+description: Builds a link-free curated artifact and SHA-256 manifest without repository or report clones.
+
+inputs:
+  mode:
+    description: fix or verify.
+    required: true
+  run-directory:
+    description: Contained run directory; may be empty when execution failed before staging.
+    required: false
+    default: ""
+  agent-exit-code:
+    required: false
+    default: "unknown"
+  max-files:
+    description: Maximum number of regular files copied into the artifact.
+    required: false
+    default: "10000"
+  max-bytes:
+    description: Maximum cumulative artifact bytes before the manifest.
+    required: false
+    default: "500000000"
+
+outputs:
+  package-directory:
+    value: ${{ steps.package.outputs.package-directory }}
+  manifest-path:
+    value: ${{ steps.package.outputs.manifest-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Curate security-sensitive run evidence
+      id: package
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        RUN_DIRECTORY: ${{ inputs.run-directory }}
+        AGENT_EXIT_CODE: ${{ inputs.agent-exit-code }}
+        MAX_FILES: ${{ inputs.max-files }}
+        MAX_BYTES: ${{ inputs.max-bytes }}
+      run: |
+        set -euo pipefail
+        [[ "${MODE}" == "fix" || "${MODE}" == "verify" ]] || { echo "::error::mode must be fix or verify."; exit 1; }
+        [[ "${MAX_FILES}" =~ ^[1-9][0-9]*$ && "${MAX_BYTES}" =~ ^[1-9][0-9]*$ ]] || {
+          echo "::error::Artifact file and byte limits must be positive integers."
+          exit 1
+        }
+        package="${RUNNER_TEMP}/vulnhunter-${MODE}-artifact-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        [[ ! -e "${package}" ]] || { echo "::error::Artifact package path already exists."; exit 1; }
+        mkdir -m 0700 "${package}"
+
+        PACKAGE_DIRECTORY="${package}" python3 - <<'PY'
+        import hashlib
+        import json
+        import os
+        import shutil
+        import stat
+        from pathlib import Path
+
+        package = Path(os.environ["PACKAGE_DIRECTORY"])
+        raw_run = os.environ.get("RUN_DIRECTORY", "")
+        excluded_parts = {
+            ".git", ".tmp", "work", "repo", "report", "additional_repos",
+            "node_modules", ".venv", "__pycache__", ".pytest_cache",
+        }
+        copied = []
+        total_bytes = 0
+        max_files = int(os.environ["MAX_FILES"])
+        max_bytes = int(os.environ["MAX_BYTES"])
+        if raw_run:
+            run = Path(raw_run).resolve(strict=True)
+            if run.is_symlink() or not run.is_dir():
+                raise SystemExit("Run directory is not a regular directory")
+            for source in sorted(run.rglob("*")):
+                relative = source.relative_to(run)
+                if any(part in excluded_parts for part in relative.parts):
+                    continue
+                mode = source.lstat().st_mode
+                if stat.S_ISLNK(mode):
+                    raise SystemExit(f"Refusing to package symlink: {relative}")
+                if stat.S_ISDIR(mode):
+                    continue
+                if not stat.S_ISREG(mode):
+                    raise SystemExit(f"Refusing to package special file: {relative}")
+                source_size = source.stat().st_size
+                if len(copied) + 1 > max_files or total_bytes + source_size > max_bytes:
+                    raise SystemExit("Curated artifact exceeds its configured file or byte limit")
+                destination = package / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination, follow_symlinks=False)
+                digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+                copied.append({"path": relative.as_posix(), "sha256": digest, "bytes": destination.stat().st_size})
+                total_bytes += source_size
+
+        metadata = {
+            "schema_version": 1,
+            "mode": os.environ["MODE"],
+            "agent_exit_code": os.environ.get("AGENT_EXIT_CODE", "unknown"),
+            "run_artifacts_available": bool(raw_run),
+            "files": copied,
+        }
+        manifest = package / "SHA256_MANIFEST.json"
+        manifest.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        PY
+
+        {
+          echo "package-directory=${package}"
+          echo "manifest-path=${package}/SHA256_MANIFEST.json"
+        } >> "${GITHUB_OUTPUT}"

@@ -438,6 +438,15 @@ as the only delivery route. See the
 [Mythos security profile](mythos-security-profile.md) for the complete control and
 failure matrix.
 
+## GitHub Actions fix and verify
+
+The manual/reusable fix and verify workflows decompose trusted intake, model execution,
+credential-free attestation, and artifact packaging into separate composite actions. Fix
+defaults to a local dry run; verify defaults to no comments and no reopen. Both preserve
+the agent's exact exit status through always-run evidence collection, then restore failure
+at the workflow boundary. See [GitHub Actions remediation and verification](github-actions-remediation.md)
+for trust boundaries, inputs, secrets, artifacts, and operating procedures.
+
 ## Process outcomes
 
 ### Scan-mode exit codes observed in the CLI
