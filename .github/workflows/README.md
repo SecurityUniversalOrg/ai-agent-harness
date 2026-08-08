@@ -1,0 +1,329 @@
+# GitHub Actions authentication setup
+
+This repository runs three GitHub Actions workflows that need their own GitHub
+credentials, separate from the built-in `GITHUB_TOKEN`:
+
+| Workflow | File | Purpose | Protected environment |
+|---|---|---|---|
+| **Scan** | [`org-ai-security-discovery.yaml`](org-ai-security-discovery.yaml) | Runs VulnHunter across every repo in `config/repos.csv` and files findings issues | *(none)* |
+| **Fix** | [`vulnhunter-agent-fix.yaml`](vulnhunter-agent-fix.yaml) | Unattended remediation against one published report | `vulnhunter-fix` |
+| **Verify** | [`vulnhunter-agent-verify.yaml`](vulnhunter-agent-verify.yaml) | Confirms whether closed findings are actually fixed | `vulnhunter-verify` |
+
+Every workflow supports two ways to supply its GitHub tokens, selected per run
+with the `github_auth_method` input:
+
+- **`pat`** (the default) — a token you create once and store as a long-lived
+  secret.
+- **`github_app`** — a GitHub App installation token minted fresh at the start
+  of every run, scoped to only the repository that run touches, and
+  automatically revoked when the job ends.
+
+This document is a step-by-step setup guide for both. For the design
+rationale and exactly how each workflow consumes these tokens, see
+[GitHub Actions remediation and verification § GitHub authentication: PAT or GitHub App](../../docs/architecture/github-actions-remediation.md#github-authentication-pat-or-github-app).
+
+> Pick one method per workflow — you don't have to use the same method for
+> scan, fix, and verify. A common pattern is `pat` while you're getting a
+> workflow working, then `github_app` once you're ready to stop maintaining a
+> long-lived credential.
+
+## Table of contents
+
+- [Quick reference](#quick-reference)
+- [Which token does what](#which-token-does-what)
+- [Anthropic credentials (both auth methods need these)](#anthropic-credentials-both-auth-methods-need-these)
+- [Option A: Personal Access Token (PAT) setup](#option-a-personal-access-token-pat-setup)
+- [Option B: GitHub App setup](#option-b-github-app-setup)
+- [Where to put secrets: repository, environment, or organization](#where-to-put-secrets-repository-environment-or-organization)
+- [Per-workflow dispatch checklist](#per-workflow-dispatch-checklist)
+- [Repository/organization variables reference](#repositoryorganization-variables-reference)
+- [Troubleshooting](#troubleshooting)
+- [Security recommendations](#security-recommendations)
+
+## Quick reference
+
+| Workflow | `github_auth_method=pat` secrets | `github_auth_method=github_app` secrets |
+|---|---|---|
+| Scan | `VULNHUNT_GITHUB_SCAN_TOKEN`, `VULNHUNT_GITHUB_REPORTS_TOKEN` | `VULNHUNT_GITHUB_APP_ID`, `VULNHUNT_GITHUB_APP_PRIVATE_KEY` |
+| Fix | `VULNHUNT_GITHUB_FIX_TOKEN`, `VULNHUNT_GITHUB_REPORTS_TOKEN` | `VULNHUNT_GITHUB_APP_ID`, `VULNHUNT_GITHUB_APP_PRIVATE_KEY` |
+| Verify | `VULNHUNT_GITHUB_VERIFY_TOKEN`, `VULNHUNT_GITHUB_REPORTS_TOKEN` | `VULNHUNT_GITHUB_APP_ID`, `VULNHUNT_GITHUB_APP_PRIVATE_KEY` |
+
+All three workflows additionally need `ANTHROPIC_AWS_WORKSPACE_ID` and
+`ANTHROPIC_AWS_API_KEY` (see
+[below](#anthropic-credentials-both-auth-methods-need-these)) — those are
+unrelated to GitHub authentication and identical either way.
+
+Every workflow validates its inputs in a "Validate GitHub authentication
+inputs" step that runs *before* any clone or checkout. If you pick
+`github_auth_method=pat` but only set up the App secrets (or vice versa), the
+run fails immediately with a clear `::error::` instead of a confusing
+downstream 401/403.
+
+## Which token does what
+
+Each token is scoped to exactly what that role touches — this matters for
+both PAT scope selection and GitHub App permissions/installation below.
+
+| Role | Used by | What it does | Minimum REST operations | PAT scope guidance | GitHub App permissions |
+|---|---|---|---|---|---|
+| `scan-token` | Scan | Clones the scanned repo; lists/creates/closes findings issues and labels on it | `GET/PUT labels`, `POST issues`, `PATCH issues`, `POST issue comments`, clone (git) | Classic: `repo`. Fine-grained: **Contents: Read**, **Issues: Read and write** | **Contents: Read**, **Issues: Read and write** |
+| `verify-token` | Verify | Clones the target repo (and any cross-referenced repos); reads issue/comment/timeline history via REST + GraphQL; posts verdict comments and reopens issues when enabled | `GET issues`, GraphQL `userContentEdits`, `GET comments/events`, `POST issue comments`, `PATCH issues`, clone (git) | Classic: `repo`. Fine-grained: **Contents: Read**, **Issues: Read and write**, **Metadata: Read** | **Contents: Read**, **Issues: Read and write** |
+| `fix-token` | Fix | Clones the target repo; when `delivery_enabled=true`, forks it, pushes branches, and opens PRs/issues in that private fork | Clone (git); `POST /repos/{owner}/{repo}/forks`; push (git); `POST pulls`; `POST issues` | Classic: `repo`, plus membership/repo-creation rights in the fork destination org. Fine-grained: **Contents: Read** (dry run) or **Contents: Read and write**, **Pull requests: Read and write**, **Issues: Read and write**, **Administration: Read and write** (delivery) | See [Fork delivery: a two-sided requirement](#fork-delivery-a-two-sided-requirement) below — this one is not a single simple grant |
+| `reports-token` | All three | Reads the exact published report (fix/verify: read-only checkout of one path) or pushes new results (scan: write) | Sparse checkout (fix/verify) or `git push` (scan) | Classic: `repo`. Fine-grained: **Contents: Read** (fix/verify) or **Contents: Read and write** (scan) | **Contents: Read** (fix/verify) or **Contents: Read and write** (scan) |
+
+`fix-token` and `verify-token` are deliberately separate from `scan-token`
+even though they often point at the same target repo — see
+[`docs/architecture/github-actions-remediation.md`](../../docs/architecture/github-actions-remediation.md)
+for why the codebase keeps per-role tokens rather than one shared credential.
+
+### Fork delivery: a two-sided requirement
+
+`delivery_enabled=true` fix runs create a **private fork** of the target
+repo and push there — this is the one role that isn't a simple "grant access
+to one repo" story, for either auth method:
+
+- **PAT**: the token's owner needs permission to create repositories in the
+  fork destination (`fork-org` — see [variables reference](#repositoryorganization-variables-reference)
+  below). A classic PAT with the `repo` scope, from an account that's a
+  member of `fork-org` with repo-creation rights (or the org allows any
+  member to create repos), covers this in one step.
+- **GitHub App**: per
+  [GitHub's own documentation](https://docs.github.com/en/rest/repos/forks#create-a-fork),
+  *"the GitHub App must be installed on the destination account with access
+  to all repositories and on the source account with access to the source
+  repository."* Concretely: install the App on the target org (scoped to the
+  target repo is fine) **and separately** on `fork-org` with **all
+  repositories** access (not scoped to one repo — the fork doesn't exist
+  until the run creates it) and **Administration: Read and write** there.
+
+If you're setting up `github_auth_method=github_app` for fix, **start with
+`delivery_enabled=false`** (the default) and confirm the dry run succeeds
+before enabling delivery and testing the fork path. This repository's own
+sandbox scripts and workflow wiring for GitHub App auth have not been
+exercised end-to-end against live fork creation — treat the first
+delivery-enabled + `github_app` run as a real test, not an assumption.
+
+## Anthropic credentials (both auth methods need these)
+
+Unrelated to GitHub auth, but required either way:
+
+| Secret | Purpose |
+|---|---|
+| `ANTHROPIC_AWS_WORKSPACE_ID` | Claude Platform on AWS workspace selection |
+| `ANTHROPIC_AWS_API_KEY` | Claude Platform on AWS authentication |
+
+## Option A: Personal Access Token (PAT) setup
+
+PATs are the simplest way to get a workflow running and the default
+(`github_auth_method=pat`). Fine-grained PATs are strongly preferred over
+classic PATs — they let you grant exactly the permissions in the table above
+instead of the blanket `repo` scope, and they're scoped to specific
+repositories instead of every repo the account can see.
+
+### Steps (repeat per token role)
+
+1. GitHub → your profile photo → **Settings** → **Developer settings** →
+   **Personal access tokens** → **Fine-grained tokens** → **Generate new
+   token**.
+2. **Resource owner**: the org/account that owns the repo(s) this token
+   needs to touch (see the table above — `scan-token`/`verify-token`/
+   `fix-token` target the *scanned/verified/fixed* repo's owner;
+   `reports-token` targets the *reports repository*'s owner).
+3. **Repository access**: "Only select repositories" → pick exactly the
+   repo(s) this token needs. For `scan-token`, that's every repo listed in
+   [`config/repos.csv`](../../config/repos.csv) — for more than a handful of
+   repos, a classic PAT with `repo` scope (blanket access) or a GitHub App
+   installed org-wide is more practical than hand-picking each one in the
+   fine-grained token UI.
+4. **Permissions** → **Repository permissions**: set exactly what the
+   table above lists for this role (e.g. `scan-token` → Contents: Read,
+   Issues: Read and write). Leave everything else "No access".
+5. **Expiration**: set the shortest expiration your operational tolerance
+   allows, and put a recurring calendar reminder to rotate it — a
+   fine-grained PAT cannot auto-renew the way a GitHub App installation
+   token does. This is the main practical advantage `github_app` has over
+   `pat` for a workflow you intend to run indefinitely.
+6. Generate, copy the token immediately (GitHub shows it once), and store it
+   as the matching secret from the [quick reference table](#quick-reference)
+   — see [where to put secrets](#where-to-put-secrets-repository-environment-or-organization)
+   below for exactly where.
+
+`reports-token` is shared across all three workflows (they all read from or
+publish to the same central reports repository) — create it once and reuse
+the same secret value in each workflow's secret store.
+
+## Option B: GitHub App setup
+
+A GitHub App gives you one reusable credential (an App ID + private key)
+that mints short-lived, automatically-scoped, automatically-revoked tokens
+for every run — no long-lived secret to rotate, and every minted token is
+visible in the App's own installation audit trail.
+
+### 1. Create the App
+
+1. GitHub → your profile photo (or org settings, if this is an
+   org-owned App) → **Settings** → **Developer settings** → **GitHub Apps**
+   → **New GitHub App**.
+2. **GitHub App name**: anything identifying, e.g. `vulnhunter-agent-ci`.
+3. **Homepage URL**: any valid URL — this repository's URL is fine.
+4. **Webhook**: uncheck **Active**. These workflows never receive webhook
+   events; leaving it active just adds an unused attack surface.
+5. **Repository permissions** — grant the *union* of what every role you
+   plan to use needs, from the [table above](#which-token-does-what). If
+   you're only setting this App up for one workflow (say, verify only),
+   grant only that workflow's permissions:
+
+   | Permission | Access level | Needed by |
+   |---|---|---|
+   | Contents | Read and write | All roles (write needed by `reports-token` on scan, and `fix-token` when delivery is enabled) |
+   | Issues | Read and write | `scan-token`, `verify-token`, `fix-token` (delivery) |
+   | Pull requests | Read and write | `fix-token` (delivery) |
+   | Administration | Read and write | `fix-token` (delivery — fork creation only; see [Fork delivery](#fork-delivery-a-two-sided-requirement)) |
+   | Metadata | Read-only | Every role (GitHub grants this automatically) |
+
+6. **Where can this GitHub App be installed?**: "Only on this account"
+   unless you specifically need it installed across multiple
+   organizations/accounts you don't control directly.
+7. Create the App.
+
+### 2. Generate the private key
+
+1. On the App's settings page, scroll to **Private keys** → **Generate a
+   private key**. This downloads a `.pem` file — GitHub does not keep a
+   copy, so store it securely immediately (a secrets manager, not a laptop
+   downloads folder).
+2. Note the **App ID** shown near the top of the same page — you'll need
+   both values for secrets in step 4.
+
+### 3. Install the App
+
+Install the App (**Install App** in the left sidebar) on every account
+these tokens need to reach:
+
+- The org/account owning the repo(s) `scan-token` clones and files issues
+  on — select the specific repos from `config/repos.csv`, or "All
+  repositories" if that's simpler to maintain as the CSV changes.
+- The org/account owning the repo `verify-token`/`fix-token` targets for a
+  given run (this can be "All repositories" on an org if you run fix/verify
+  against many repos in that org, or a specific repo if you only ever
+  target one).
+- The org/account owning the **reports repository** (`reports-token`).
+- If `fix-token` will ever run with `delivery_enabled=true`: **also**
+  install on `fork-org` with **all repositories** access — see
+  [Fork delivery](#fork-delivery-a-two-sided-requirement) above, this is a
+  separate installation from the target repo's.
+
+The same App can be (and typically is) installed multiple times across
+different accounts/orgs; each installation is independent.
+
+### 4. Store the App credentials as secrets
+
+For each workflow you want to use `github_auth_method=github_app` with, add
+two secrets (see [where to put secrets](#where-to-put-secrets-repository-environment-or-organization)
+for exactly where):
+
+| Secret | Value |
+|---|---|
+| `VULNHUNT_GITHUB_APP_ID` | The App ID from step 2 |
+| `VULNHUNT_GITHUB_APP_PRIVATE_KEY` | The full contents of the `.pem` file from step 2, including the `-----BEGIN/END PRIVATE KEY-----` lines |
+
+These same two secrets are reused across all three workflows if you use one
+App everywhere — you don't need a separate App per workflow, only a
+correctly-scoped installation per org/account each workflow's tokens need
+to reach.
+
+## Where to put secrets: repository, environment, or organization
+
+- **Fix and verify** each run under a [protected GitHub Environment](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment)
+  (`vulnhunter-fix` and `vulnhunter-verify` respectively — see each
+  workflow's `environment:` key). **Store their secrets as environment
+  secrets on those environments**, not repository secrets, and configure
+  required reviewers on both environments. This is what makes
+  `delivery_enabled`/`post_comments` actually gated by human approval rather
+  than a config default.
+- **Scan** (`org-ai-security-discovery.yaml`) does not declare a protected
+  environment today, so its secrets must be repository or organization
+  secrets.
+- Any secret needed by more than one workflow (in particular
+  `VULNHUNT_GITHUB_APP_ID`/`VULNHUNT_GITHUB_APP_PRIVATE_KEY` if you use one
+  App everywhere) can be set once as an **organization secret** scoped to
+  this repository, instead of duplicating it into every environment.
+
+## Per-workflow dispatch checklist
+
+**Scan** (`workflow_dispatch` or the weekly `schedule`):
+- [ ] `config/repos.csv` lists every repo to scan
+- [ ] Either `VULNHUNT_GITHUB_SCAN_TOKEN` + `VULNHUNT_GITHUB_REPORTS_TOKEN`, or `VULNHUNT_GITHUB_APP_ID` + `VULNHUNT_GITHUB_APP_PRIVATE_KEY`, are set
+- [ ] For scheduled (non-dispatch) runs: set the repository variable `VULNHUNT_GITHUB_AUTH_METHOD` if you want scheduled runs to use `github_app` — scheduled runs can't read a dispatch input, so they fall back to this variable (default `pat`)
+- [ ] If using Mythos (`model: claude-mythos-5`), also set `mythos_retention_acknowledged: true` and provision a `gvisor`-labeled runner
+
+**Fix** (`workflow_dispatch` or `workflow_call`):
+- [ ] A published report exists (`reports_repository` + `reports_ref` + `results_path` point at it)
+- [ ] Either `VULNHUNT_GITHUB_FIX_TOKEN` + `VULNHUNT_GITHUB_REPORTS_TOKEN`, or `VULNHUNT_GITHUB_APP_ID` + `VULNHUNT_GITHUB_APP_PRIVATE_KEY`, are set as **environment secrets on `vulnhunter-fix`**
+- [ ] `delivery_enabled` left `false` for a first run; see [Fork delivery](#fork-delivery-a-two-sided-requirement) before ever setting it `true`
+- [ ] If using Mythos, also set `mythos_retention_acknowledged: true`
+
+**Verify** (`workflow_dispatch` or `workflow_call`):
+- [ ] `VULNHUNT_TRUSTED_ISSUE_AUTHORS` (repository/org variable) names the scanner bot or App login that created the findings you're verifying
+- [ ] Either `VULNHUNT_GITHUB_VERIFY_TOKEN` + `VULNHUNT_GITHUB_REPORTS_TOKEN`, or `VULNHUNT_GITHUB_APP_ID` + `VULNHUNT_GITHUB_APP_PRIVATE_KEY`, are set as **environment secrets on `vulnhunter-verify`**
+- [ ] `post_comments`/`reopen_nonfixed` left `false` for a first run
+- [ ] If using Mythos, also set `mythos_retention_acknowledged: true`
+
+## Repository/organization variables reference
+
+These are `vars.*`, not secrets — configure under **Settings → Secrets and
+variables → Actions → Variables** (repository or organization level):
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `VULNHUNT_GITHUB_AUTH_METHOD` | Scan (scheduled runs only) | `pat` or `github_app`; `workflow_dispatch` runs use the dispatch input instead |
+| `VULNHUNT_REPORTS_REPOSITORY` | Scan | Central reports repo URL (defaults to this repo) |
+| `VULNHUNT_REPORTS_BRANCH` | Scan | Central reports branch (default `main`) |
+| `VULNHUNT_PUBLISH_RESULTS` | Scan (scheduled runs only) | `false` to disable report publishing on schedule |
+| `VULNHUNT_SUBMIT_REPO_ISSUES` | Scan (scheduled runs only) | `false` to disable issue filing on schedule |
+| `VULNHUNT_FIX_FORK_ORG` | Fix | Where private forks are created — see [Fork delivery](#fork-delivery-a-two-sided-requirement) |
+| `VULNHUNT_FIX_ALLOWED_DOMAINS` | Fix | Extra dependency-install domains allowed in the sandbox (Opus only — forbidden under Mythos) |
+| `VULNHUNT_FIX_RUNNER` / `VULNHUNT_FIX_GVISOR_RUNNER` | Fix | Runner label override for Opus / Mythos |
+| `VULNHUNT_VERIFY_RUNNER` / `VULNHUNT_VERIFY_GVISOR_RUNNER` | Verify | Runner label override for Opus / Mythos |
+| `VULNHUNT_TRUSTED_ISSUE_AUTHORS` | Verify | Comma-separated logins verify trusts as finding-issue authors |
+
+## Troubleshooting
+
+- **`::error::github_auth_method=pat requires the ... secrets.`** — the
+  method is `pat` (or defaulted to it) but one or both of that workflow's
+  PAT secrets is empty. Check you set them on the right scope (environment
+  vs repository — see [above](#where-to-put-secrets-repository-environment-or-organization)).
+- **`::error::github_auth_method=github_app requires the ... secrets.`** —
+  same, for `VULNHUNT_GITHUB_APP_ID`/`VULNHUNT_GITHUB_APP_PRIVATE_KEY`.
+- **`actions/create-github-app-token` fails with a 404 or "resource not
+  accessible"** — the App isn't installed on the account/repo the run is
+  trying to scope a token to. Recheck [step 3](#3-install-the-app);
+  remember `fix-token`'s destination org needs a *separate* installation
+  from its source org when delivery is enabled.
+- **A token minted successfully but the run still gets a 403 from
+  GitHub** — the App's *permissions* (step 1) don't cover the operation
+  being attempted, even though the *installation* (step 3) is correct.
+  Recheck the [permissions table](#1-create-the-app) against what actually
+  failed.
+- **PAT preflight failure with a token fingerprint in the error** — the
+  agent's own startup preflight (`agent/__main__.py`) hit an auth failure
+  against `GET /installation/repositories` and prints a token fingerprint
+  (`ghp_...abcd (len=40)`) so you can compare it against what you configured
+  — a mismatch usually means a stale secret value or the wrong secret scope
+  shadowing the one you meant to set.
+
+## Security recommendations
+
+- Prefer `github_app` for any workflow you run routinely — it removes a
+  long-lived credential from secret storage entirely.
+- If you do use `pat`, prefer fine-grained tokens scoped to exactly the
+  repos in the [table above](#which-token-does-what), set the shortest
+  expiration you can tolerate, and rotate before it lapses.
+- Configure required reviewers on the `vulnhunter-fix` and
+  `vulnhunter-verify` environments before ever setting `delivery_enabled`
+  or `post_comments` to `true` by default for anyone other than yourself.
+- Never grant a fine-grained PAT or a GitHub App installation more repos or
+  more permissions than the [table above](#which-token-does-what) lists for
+  the role you're configuring it for — the codebase's own design keeps
+  these roles separate specifically so a compromised token has a small,
+  known blast radius.
