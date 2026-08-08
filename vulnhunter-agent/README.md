@@ -50,7 +50,9 @@ Both also accept a `github_auth_method` input (`pat`, the default, or `github_ap
 `github_app`, the workflow mints short-lived, auto-revoked, per-role-scoped installation
 tokens at run time via `actions/create-github-app-token@v2` instead of reading long-lived
 PAT secrets. `.github/workflows/org-ai-security-discovery.yaml` (scan) supports the same
-toggle. See [GitHub authentication: PAT or GitHub App](../docs/architecture/github-actions-remediation.md#github-authentication-pat-or-github-app).
+toggle. For setup instructions (PAT scopes and GitHub App permissions, per role, per
+workflow) see [`.github/workflows/README.md`](../.github/workflows/README.md); for the
+design rationale see [GitHub authentication: PAT or GitHub App](../docs/architecture/github-actions-remediation.md#github-authentication-pat-or-github-app).
 
 The agent hardcodes nothing sensitive: every host, credential, and path comes from a
 TOML config file and/or `VULNHUNT_*` environment variables, so the same image runs across

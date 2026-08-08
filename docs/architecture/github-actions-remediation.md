@@ -239,6 +239,11 @@ composite shell through `env` and are masked before further validation.
 
 ### GitHub authentication: PAT or GitHub App
 
+For step-by-step setup instructions (creating the PAT or App, exactly which
+permissions each role needs, where to store secrets, and a per-workflow dispatch
+checklist), see [`.github/workflows/README.md`](../../.github/workflows/README.md).
+This section covers the design rationale; that one covers doing it.
+
 Both `VULNHUNT_GITHUB_FIX_TOKEN`/`VULNHUNT_GITHUB_VERIFY_TOKEN` and
 `VULNHUNT_GITHUB_REPORTS_TOKEN` can come from either source, selected per run by the
 `github_auth_method` input (`pat`, the default, or `github_app`):
