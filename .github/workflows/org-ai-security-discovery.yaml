@@ -21,6 +21,14 @@ on:
         required: false
         type: boolean
         default: false
+      github_auth_method:
+        description: How to obtain the scan and reports GitHub tokens
+        required: false
+        type: choice
+        default: pat
+        options:
+          - pat
+          - github_app
       publish_results:
         description: Publish reports to the central repository
         required: false
@@ -71,6 +79,12 @@ jobs:
     runs-on: ${{ (inputs.model == 'claude-mythos-5') && 'gvisor' || 'ubuntu-latest' }}
     needs: build-matrix
 
+    env:
+      # Same schedule-vs-dispatch fallback shape as publish_results/submit_repo_issues
+      # below: workflow_dispatch reads the input directly, scheduled runs fall back to
+      # a protected repository variable (or 'pat' if that variable is unset).
+      RESOLVED_AUTH_METHOD: ${{ (github.event_name == 'workflow_dispatch' && inputs.github_auth_method) || (github.event_name != 'workflow_dispatch' && (vars.VULNHUNT_GITHUB_AUTH_METHOD || 'pat')) }}
+
     strategy:
       fail-fast: false
       max-parallel: 30
@@ -82,7 +96,72 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: ./
-      
+
+      - name: Validate GitHub authentication inputs
+        shell: bash
+        env:
+          AUTH_METHOD: ${{ env.RESOLVED_AUTH_METHOD }}
+          APP_ID: ${{ secrets.VULNHUNT_GITHUB_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.VULNHUNT_GITHUB_APP_PRIVATE_KEY }}
+          PAT_SCAN: ${{ secrets.VULNHUNT_GITHUB_SCAN_TOKEN }}
+          PAT_REPORTS: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "${AUTH_METHOD}" in
+            pat)
+              [[ -n "${PAT_SCAN}" && -n "${PAT_REPORTS}" ]] || {
+                echo "::error::github_auth_method=pat requires the VULNHUNT_GITHUB_SCAN_TOKEN and VULNHUNT_GITHUB_REPORTS_TOKEN secrets."
+                exit 1
+              }
+              ;;
+            github_app)
+              [[ -n "${APP_ID}" && -n "${APP_PRIVATE_KEY}" ]] || {
+                echo "::error::github_auth_method=github_app requires the VULNHUNT_GITHUB_APP_ID and VULNHUNT_GITHUB_APP_PRIVATE_KEY secrets."
+                exit 1
+              }
+              ;;
+            *)
+              echo "::error::Unsupported github_auth_method '${AUTH_METHOD}'; use 'pat' or 'github_app'."
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve GitHub App token scopes
+        id: app-scope
+        if: env.RESOLVED_AUTH_METHOD == 'github_app'
+        shell: bash
+        env:
+          REPORTS_REPOSITORY_URL: ${{ vars.VULNHUNT_REPORTS_REPOSITORY || format('{0}/{1}', github.server_url, github.repository) }}
+        run: |
+          set -euo pipefail
+          # REPORTS_REPOSITORY_URL is scheme://host/owner/repo; strip scheme and host.
+          without_scheme="${REPORTS_REPOSITORY_URL#*://}"
+          path="${without_scheme#*/}"
+          {
+            echo "reports-owner=${path%%/*}"
+            echo "reports-repo=${path#*/}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Mint scan-scoped GitHub App installation token
+        id: mint-scan-token
+        if: env.RESOLVED_AUTH_METHOD == 'github_app'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.VULNHUNT_GITHUB_APP_ID }}
+          private-key: ${{ secrets.VULNHUNT_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ matrix.owner }}
+          repositories: ${{ matrix.repo }}
+
+      - name: Mint reports-scoped GitHub App installation token
+        id: mint-reports-token
+        if: env.RESOLVED_AUTH_METHOD == 'github_app'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.VULNHUNT_GITHUB_APP_ID }}
+          private-key: ${{ secrets.VULNHUNT_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ steps.app-scope.outputs.reports-owner }}
+          repositories: ${{ steps.app-scope.outputs.reports-repo }}
+
       - name: (Temp until dedicated agent) Install Claude Skills
         if: ${{ (inputs.model || 'claude-opus-4-8') != 'claude-mythos-5' }}
         shell: bash
@@ -97,8 +176,8 @@ jobs:
         with:
           aws-workspace-id: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
           aws-api-key: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
-          scan-token: ${{ secrets.VULNHUNT_GITHUB_SCAN_TOKEN }}
-          reports-token: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+          scan-token: ${{ env.RESOLVED_AUTH_METHOD == 'github_app' && steps.mint-scan-token.outputs.token || secrets.VULNHUNT_GITHUB_SCAN_TOKEN }}
+          reports-token: ${{ env.RESOLVED_AUTH_METHOD == 'github_app' && steps.mint-reports-token.outputs.token || secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
           publish-results: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_results) || (github.event_name != 'workflow_dispatch' && vars.VULNHUNT_PUBLISH_RESULTS != 'false') }}
           submit-repo-issues: ${{ (github.event_name == 'workflow_dispatch' && inputs.submit_repo_issues) || (github.event_name != 'workflow_dispatch' && vars.VULNHUNT_SUBMIT_REPO_ISSUES != 'false') }}
           reports-repository-url: ${{ vars.VULNHUNT_REPORTS_REPOSITORY || format('{0}/{1}', github.server_url, github.repository) }}
@@ -115,8 +194,8 @@ jobs:
         with:
           aws-workspace-id: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
           aws-api-key: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
-          scan-token: ${{ secrets.VULNHUNT_GITHUB_SCAN_TOKEN }}
-          reports-token: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+          scan-token: ${{ env.RESOLVED_AUTH_METHOD == 'github_app' && steps.mint-scan-token.outputs.token || secrets.VULNHUNT_GITHUB_SCAN_TOKEN }}
+          reports-token: ${{ env.RESOLVED_AUTH_METHOD == 'github_app' && steps.mint-reports-token.outputs.token || secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
           publish-results: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_results) || (github.event_name != 'workflow_dispatch' && vars.VULNHUNT_PUBLISH_RESULTS != 'false') }}
           submit-repo-issues: ${{ (github.event_name == 'workflow_dispatch' && inputs.submit_repo_issues) || (github.event_name != 'workflow_dispatch' && vars.VULNHUNT_SUBMIT_REPO_ISSUES != 'false') }}
           reports-repository-url: ${{ vars.VULNHUNT_REPORTS_REPOSITORY || format('{0}/{1}', github.server_url, github.repository) }}
