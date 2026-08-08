@@ -20,6 +20,14 @@ on:
         required: false
         default: main
         type: string
+      github_auth_method:
+        description: How to obtain the verify and reports GitHub tokens
+        required: false
+        default: pat
+        type: choice
+        options:
+          - pat
+          - github_app
       commit:
         description: Optional target commit SHA
         required: false
@@ -74,6 +82,10 @@ on:
         required: false
         default: main
         type: string
+      github_auth_method:
+        required: false
+        default: pat
+        type: string
       commit:
         required: false
         default: ""
@@ -112,10 +124,19 @@ on:
         required: true
       ANTHROPIC_AWS_API_KEY:
         required: true
+      # Exactly one credential source is required, gated by the github_auth_method input:
+      # the PAT pair when 'pat' (the default), or the GitHub App pair when
+      # 'github_app'. Neither can be declared required: true here — GitHub
+      # Actions can't express "required unless X" — so the "Validate GitHub
+      # authentication inputs" step enforces it at runtime instead.
       VULNHUNT_GITHUB_VERIFY_TOKEN:
-        required: true
+        required: false
       VULNHUNT_GITHUB_REPORTS_TOKEN:
-        required: true
+        required: false
+      VULNHUNT_GITHUB_APP_ID:
+        required: false
+      VULNHUNT_GITHUB_APP_PRIVATE_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -156,6 +177,71 @@ jobs:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
+      - name: Validate GitHub authentication inputs
+        shell: bash
+        env:
+          AUTH_METHOD: ${{ inputs.github_auth_method }}
+          APP_ID: ${{ secrets.VULNHUNT_GITHUB_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.VULNHUNT_GITHUB_APP_PRIVATE_KEY }}
+          PAT_VERIFY: ${{ secrets.VULNHUNT_GITHUB_VERIFY_TOKEN }}
+          PAT_REPORTS: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "${AUTH_METHOD}" in
+            pat)
+              [[ -n "${PAT_VERIFY}" && -n "${PAT_REPORTS}" ]] || {
+                echo "::error::github_auth_method=pat requires the VULNHUNT_GITHUB_VERIFY_TOKEN and VULNHUNT_GITHUB_REPORTS_TOKEN secrets."
+                exit 1
+              }
+              ;;
+            github_app)
+              [[ -n "${APP_ID}" && -n "${APP_PRIVATE_KEY}" ]] || {
+                echo "::error::github_auth_method=github_app requires the VULNHUNT_GITHUB_APP_ID and VULNHUNT_GITHUB_APP_PRIVATE_KEY secrets."
+                exit 1
+              }
+              ;;
+            *)
+              echo "::error::Unsupported github_auth_method '${AUTH_METHOD}'; use 'pat' or 'github_app'."
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve GitHub App token scopes
+        id: app-scope
+        if: inputs.github_auth_method == 'github_app'
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
+          REPORTS_REPOSITORY: ${{ inputs.reports_repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "verify-owner=${EXPECTED_REPOSITORY%%/*}"
+            echo "verify-repo=${EXPECTED_REPOSITORY#*/}"
+            echo "reports-owner=${REPORTS_REPOSITORY%%/*}"
+            echo "reports-repo=${REPORTS_REPOSITORY#*/}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Mint verify-scoped GitHub App installation token
+        id: mint-verify-token
+        if: inputs.github_auth_method == 'github_app'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.VULNHUNT_GITHUB_APP_ID }}
+          private-key: ${{ secrets.VULNHUNT_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ steps.app-scope.outputs.verify-owner }}
+          repositories: ${{ steps.app-scope.outputs.verify-repo }}
+
+      - name: Mint reports-scoped GitHub App installation token
+        id: mint-reports-token
+        if: inputs.github_auth_method == 'github_app'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.VULNHUNT_GITHUB_APP_ID }}
+          private-key: ${{ secrets.VULNHUNT_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ steps.app-scope.outputs.reports-owner }}
+          repositories: ${{ steps.app-scope.outputs.reports-repo }}
+
       - name: Set up VulnHunter agent
         id: setup
         uses: ./.github/actions/setup-vulnhunter-agent
@@ -172,7 +258,7 @@ jobs:
           issue-urls-json: ${{ inputs.issue_urls_json }}
           trusted-issue-authors: ${{ vars.VULNHUNT_TRUSTED_ISSUE_AUTHORS }}
           expected-repository: ${{ inputs.expected_repository }}
-          verify-token: ${{ secrets.VULNHUNT_GITHUB_VERIFY_TOKEN }}
+          verify-token: ${{ inputs.github_auth_method == 'github_app' && steps.mint-verify-token.outputs.token || secrets.VULNHUNT_GITHUB_VERIFY_TOKEN }}
           github-server-url: ${{ github.server_url }}
           model: ${{ inputs.model }}
           mythos-retention-acknowledged: ${{ inputs.mythos_retention_acknowledged }}
@@ -220,8 +306,8 @@ jobs:
           reports-branch: ${{ inputs.reports_branch }}
           aws-workspace-id: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
           aws-api-key: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
-          verify-token: ${{ secrets.VULNHUNT_GITHUB_VERIFY_TOKEN }}
-          reports-token: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+          verify-token: ${{ inputs.github_auth_method == 'github_app' && steps.mint-verify-token.outputs.token || secrets.VULNHUNT_GITHUB_VERIFY_TOKEN }}
+          reports-token: ${{ inputs.github_auth_method == 'github_app' && steps.mint-reports-token.outputs.token || secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
 
       - name: Attest verify disposition
         id: attest

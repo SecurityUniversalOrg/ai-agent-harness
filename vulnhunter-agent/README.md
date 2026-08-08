@@ -46,6 +46,12 @@ receives a GitHub credential (`scripts/run_mythos_fix_sandbox.sh` /
 `scripts/run_mythos_verify_sandbox.sh`); delivery/posting stays impossible under Mythos
 either way, so there's nothing extra to opt out of.
 
+Both also accept a `github_auth_method` input (`pat`, the default, or `github_app`): with
+`github_app`, the workflow mints short-lived, auto-revoked, per-role-scoped installation
+tokens at run time via `actions/create-github-app-token@v2` instead of reading long-lived
+PAT secrets. `.github/workflows/org-ai-security-discovery.yaml` (scan) supports the same
+toggle. See [GitHub authentication: PAT or GitHub App](../docs/architecture/github-actions-remediation.md#github-authentication-pat-or-github-app).
+
 The agent hardcodes nothing sensitive: every host, credential, and path comes from a
 TOML config file and/or `VULNHUNT_*` environment variables, so the same image runs across
 environments without rebuilding.

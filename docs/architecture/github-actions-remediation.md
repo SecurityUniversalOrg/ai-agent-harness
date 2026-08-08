@@ -233,10 +233,51 @@ findings whose fix doesn't need one.
 | `VULNHUNT_GITHUB_FIX_TOKEN` | Fix trusted clone and optional model delivery | Private target read; private-fork administration, contents, issues, and PR write only when delivery is approved |
 | `VULNHUNT_GITHUB_VERIFY_TOKEN` | Verify intake, evidence fetch, clone, and optional issue mutation | Target contents/metadata/issues read; issues write only when comments or reopen are enabled |
 
-Prefer short-lived GitHub App installation tokens. Do not put tokens in workflow inputs,
-generated TOML, command arguments, job outputs, summaries, or artifacts. Every checkout
-sets `persist-credentials: false`. Secrets enter composite shell through `env` and are
-masked before further validation.
+Do not put tokens in workflow inputs, generated TOML, command arguments, job outputs,
+summaries, or artifacts. Every checkout sets `persist-credentials: false`. Secrets enter
+composite shell through `env` and are masked before further validation.
+
+### GitHub authentication: PAT or GitHub App
+
+Both `VULNHUNT_GITHUB_FIX_TOKEN`/`VULNHUNT_GITHUB_VERIFY_TOKEN` and
+`VULNHUNT_GITHUB_REPORTS_TOKEN` can come from either source, selected per run by the
+`github_auth_method` input (`pat`, the default, or `github_app`):
+
+- **`pat`** — the workflow reads the token straight out of the named secret, exactly as
+  before. No new configuration is required; existing deployments are unaffected.
+- **`github_app`** — the workflow mints a short-lived (~1 hour, auto-revoked at job end)
+  installation access token for each role at run time, using
+  [`actions/create-github-app-token@v2`](https://github.com/actions/create-github-app-token)
+  and two additional secrets:
+
+  | Secret | Purpose |
+  |---|---|
+  | `VULNHUNT_GITHUB_APP_ID` | The GitHub App's ID (or client ID) |
+  | `VULNHUNT_GITHUB_APP_PRIVATE_KEY` | The GitHub App's private key (PEM) |
+
+  Every role gets its own token, minted with `owner`/`repositories` scoped to *only* the
+  repository that role touches (the fix/verify/scan target for its token, the reports
+  destination for that one) — the same least-privilege separation the PAT design already
+  documents above, just with tokens that expire on their own instead of living in secret
+  storage indefinitely. A "Validate GitHub authentication inputs" step runs first and
+  fails the job immediately, before any clone or checkout, if the credentials the selected
+  method needs aren't present — `github_auth_method=pat` without the PAT secrets, or
+  `github_auth_method=github_app` without the App secrets, is a fast, clear failure rather
+  than a confusing downstream auth error.
+
+  The App must be installed wherever its minted tokens need to reach: on the org/repo
+  owning the fix/verify/scan target, and on the org/repo owning the reports destination
+  (often the workflow's own repository). Grant it only the permissions each role actually
+  needs (contents; issues; pull requests only if delivery/posting will ever be enabled) —
+  `create-github-app-token` accepts `permission-<name>` inputs to request a subset of the
+  App's installed permissions if you want tokens narrower than the App's ceiling, though
+  the workflows here don't set any by default (they inherit whatever the App was
+  installed with).
+
+  This applies identically under Mythos: the App-minted token is just a regular bearer
+  token used by the same trusted host process that already holds PAT-sourced tokens
+  outside the gVisor container (see [Mythos gVisor execution](#mythos-gvisor-execution)).
+  Nothing about token provenance changes what does or doesn't reach the model container.
 
 ## Outcomes and artifacts
 
@@ -262,6 +303,8 @@ to 14 days and should be reduced where organizational evidence policy permits.
 5. Store fork organization and allowed dependency domains in protected
    `VULNHUNT_FIX_FORK_ORG` and `VULNHUNT_FIX_ALLOWED_DOMAINS` variables, then approve a
    separate delivery-enabled invocation only after reviewing those policy values.
+6. Leave `github_auth_method=pat` (the default) unless you've provisioned a GitHub App
+   for this workflow — see [GitHub authentication: PAT or GitHub App](#github-authentication-pat-or-github-app).
 
 ### Verify dry run
 
