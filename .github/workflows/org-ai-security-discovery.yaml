@@ -11,7 +11,7 @@ on:
         description: How to obtain the scan and reports GitHub tokens
         required: false
         type: choice
-        default: pat
+        default: github_app
         options:
           - pat
           - github_app
@@ -46,7 +46,7 @@ on:
         description: Create or update findings issues in scanned repositories
         required: false
         type: boolean
-        default: true
+        default: false
 
 
   schedule:
