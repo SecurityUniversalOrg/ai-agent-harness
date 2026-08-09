@@ -7,20 +7,6 @@ on:
         description: Path to CSV containing repositories to scan
         required: false
         default: config/repos.csv
-      model:
-        description: Claude model execution profile
-        required: true
-        type: choice
-        default: claude-opus-4-8
-        options:
-          - claude-opus-4-7
-          - claude-opus-4-8
-          - claude-mythos-5
-      mythos_retention_acknowledged:
-        description: Acknowledge mandatory 30-day Mythos request retention (no ZDR)
-        required: false
-        type: boolean
-        default: false
       github_auth_method:
         description: How to obtain the scan and reports GitHub tokens
         required: false
@@ -37,6 +23,20 @@ on:
         options:
           - api_key
           - aws_role
+      model:
+        description: Claude model execution profile
+        required: true
+        type: choice
+        default: claude-opus-4-8
+        options:
+          - claude-opus-4-7
+          - claude-opus-4-8
+          - claude-mythos-5
+      mythos_retention_acknowledged:
+        description: Acknowledge mandatory 30-day Mythos request retention (no ZDR)
+        required: false
+        type: boolean
+        default: false
       publish_results:
         description: Publish reports to the central repository
         required: false
