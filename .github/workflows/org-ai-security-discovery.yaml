@@ -162,14 +162,6 @@ jobs:
           owner: ${{ steps.app-scope.outputs.reports-owner }}
           repositories: ${{ steps.app-scope.outputs.reports-repo }}
 
-      - name: (Temp until dedicated agent) Install Claude Skills
-        if: ${{ (inputs.model || 'claude-opus-4-8') != 'claude-mythos-5' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          chmod +x ./install.sh && ./install.sh
-
       - name: Run Opus Claude agent security scan
         if: ${{ (inputs.model || 'claude-opus-4-8') != 'claude-mythos-5' }}
         uses: ./.github/actions/claude-agent-sec-scan
