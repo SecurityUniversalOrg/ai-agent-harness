@@ -194,6 +194,15 @@ setups that call Bedrock directly (use a cross-region inference-profile model ID
 shared config/credentials file, SSO, or an instance/task role. Most users want the
 default `anthropic_aws` mode.
 
+For the GitHub Actions workflows in this repository, `bedrock_sigv4` is what
+backs the `anthropic_auth_method=aws_role` option (assume an AWS IAM role via
+OIDC, no long-lived Anthropic credential in secret storage) — see
+[`.github/workflows/README.md` § Anthropic credentials: API key or AWS role](../.github/workflows/README.md#anthropic-credentials-api-key-or-aws-role)
+for the CI-side setup. It is not yet wired up for `claude-mythos-5`: the
+isolated gVisor scan container (`scripts/run_mythos_sandbox.sh` and its
+fix/verify equivalents) only forwards `anthropic_aws` API-key credentials
+into its egress-restricted network today.
+
 For Mythos, use the canonical Claude Platform model ID `claude-mythos-5` and
 `aws_region = "us-east-1"`. Its endpoint is
 `aws-external-anthropic.us-east-1.api.aws:443` (hyphens in `us-east-1`). The

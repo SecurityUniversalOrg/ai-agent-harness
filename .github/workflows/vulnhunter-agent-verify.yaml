@@ -28,6 +28,14 @@ on:
         options:
           - pat
           - github_app
+      anthropic_auth_method:
+        description: How the agent authenticates to Claude (aws_role is unsupported for claude-mythos-5)
+        required: false
+        default: api_key
+        type: choice
+        options:
+          - api_key
+          - aws_role
       commit:
         description: Optional target commit SHA
         required: false
@@ -86,6 +94,10 @@ on:
         required: false
         default: pat
         type: string
+      anthropic_auth_method:
+        required: false
+        default: api_key
+        type: string
       commit:
         required: false
         default: ""
@@ -120,10 +132,18 @@ on:
       verdict_counts_json:
         value: ${{ jobs.verify.outputs.verdict-counts-json }}
     secrets:
+      # Exactly one credential source is required, gated by the
+      # anthropic_auth_method input: the API-key pair when 'api_key' (the
+      # default), or ANTHROPIC_AWS_ROLE_ARN when 'aws_role'. Neither can be
+      # declared required: true here — GitHub Actions can't express "required
+      # unless X" — so the "Validate Anthropic authentication inputs" step
+      # enforces it at runtime instead.
       ANTHROPIC_AWS_WORKSPACE_ID:
-        required: true
+        required: false
       ANTHROPIC_AWS_API_KEY:
-        required: true
+        required: false
+      ANTHROPIC_AWS_ROLE_ARN:
+        required: false
       # Exactly one credential source is required, gated by the github_auth_method input:
       # the PAT pair when 'pat' (the default), or the GitHub App pair when
       # 'github_app'. Neither can be declared required: true here — GitHub
@@ -141,6 +161,7 @@ on:
 permissions:
   contents: read
   actions: read
+  id-token: write  # for anthropic_auth_method=aws_role (aws-actions/configure-aws-credentials OIDC)
 
 concurrency:
   group: vulnhunter-verify-${{ inputs.expected_repository }}
@@ -206,6 +227,41 @@ jobs:
               ;;
           esac
 
+      - name: Validate Anthropic authentication inputs
+        shell: bash
+        env:
+          AUTH_METHOD: ${{ inputs.anthropic_auth_method }}
+          WORKSPACE_ID: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
+          API_KEY: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
+          ROLE_ARN: ${{ secrets.ANTHROPIC_AWS_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          case "${AUTH_METHOD}" in
+            api_key)
+              [[ -n "${WORKSPACE_ID}" && -n "${API_KEY}" ]] || {
+                echo "::error::anthropic_auth_method=api_key requires the ANTHROPIC_AWS_WORKSPACE_ID and ANTHROPIC_AWS_API_KEY secrets."
+                exit 1
+              }
+              ;;
+            aws_role)
+              [[ -n "${ROLE_ARN}" ]] || {
+                echo "::error::anthropic_auth_method=aws_role requires the ANTHROPIC_AWS_ROLE_ARN secret."
+                exit 1
+              }
+              ;;
+            *)
+              echo "::error::Unsupported anthropic_auth_method '${AUTH_METHOD}'; use 'api_key' or 'aws_role'."
+              exit 1
+              ;;
+          esac
+
+      - name: Assume AWS role for Claude on Bedrock
+        if: inputs.anthropic_auth_method == 'aws_role'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.ANTHROPIC_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.VULNHUNT_ANTHROPIC_AWS_REGION || 'us-east-1' }}
+
       - name: Resolve GitHub App token scopes
         id: app-scope
         if: inputs.github_auth_method == 'github_app'
@@ -262,6 +318,7 @@ jobs:
           github-server-url: ${{ github.server_url }}
           model: ${{ inputs.model }}
           mythos-retention-acknowledged: ${{ inputs.mythos_retention_acknowledged }}
+          anthropic-auth-mode: ${{ inputs.anthropic_auth_method }}
           post-comments: ${{ inputs.post_comments }}
           reopen-nonfixed: ${{ inputs.reopen_nonfixed }}
 
@@ -304,8 +361,10 @@ jobs:
           reopen-nonfixed: ${{ inputs.reopen_nonfixed }}
           reports-repository-url: ${{ github.server_url }}/${{ inputs.reports_repository }}
           reports-branch: ${{ inputs.reports_branch }}
+          anthropic-auth-mode: ${{ inputs.anthropic_auth_method }}
           aws-workspace-id: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
           aws-api-key: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
+          aws-region: ${{ vars.VULNHUNT_ANTHROPIC_AWS_REGION || 'us-east-1' }}
           verify-token: ${{ inputs.github_auth_method == 'github_app' && steps.mint-verify-token.outputs.token || secrets.VULNHUNT_GITHUB_VERIFY_TOKEN }}
           reports-token: ${{ inputs.github_auth_method == 'github_app' && steps.mint-reports-token.outputs.token || secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
 

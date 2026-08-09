@@ -3,13 +3,31 @@ description: Runs VulnHunter using Claude Platform on AWS and scoped GitHub cred
 author: Your Organization
 
 inputs:
+  anthropic-auth-mode:
+    description: >
+      How the agent authenticates to Claude: 'api_key' (Claude Platform on
+      AWS workspace API key, the default; needs aws-workspace-id and
+      aws-api-key) or 'aws_role' (Amazon Bedrock, signed with whatever AWS
+      credentials are already present in the job environment — e.g. from an
+      aws-actions/configure-aws-credentials step run before this action, or
+      a self-hosted runner's instance/task role). Not supported for
+      model=claude-mythos-5 yet: the isolated gVisor sandbox only forwards
+      Claude Platform on AWS API-key credentials into its container.
+    required: false
+    default: api_key
+
   aws-workspace-id:
-    description: Claude Platform on AWS workspace ID
-    required: true
+    description: Claude Platform on AWS workspace ID. Required when anthropic-auth-mode=api_key.
+    required: false
 
   aws-api-key:
-    description: Claude Platform on AWS workspace API key
-    required: true
+    description: Claude Platform on AWS workspace API key. Required when anthropic-auth-mode=api_key.
+    required: false
+
+  aws-region:
+    description: AWS region for Bedrock/Claude Platform on AWS.
+    required: false
+    default: us-east-1
 
   scan-token:
     description: GitHub token used to clone target repositories and manage findings
@@ -103,6 +121,7 @@ runs:
     - name: Validate configuration
       shell: bash
       env:
+        ANTHROPIC_AUTH_MODE: ${{ inputs.anthropic-auth-mode }}
         AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
         AWS_API_KEY: ${{ inputs.aws-api-key }}
         SCAN_TOKEN: ${{ inputs.scan-token }}
@@ -122,10 +141,20 @@ runs:
         set -euo pipefail
 
         declare -A required_values=(
-          [aws-workspace-id]="${AWS_WORKSPACE_ID}"
-          [aws-api-key]="${AWS_API_KEY}"
           [scan-token]="${SCAN_TOKEN}"
         )
+
+        case "${ANTHROPIC_AUTH_MODE}" in
+          api_key)
+            required_values[aws-workspace-id]="${AWS_WORKSPACE_ID}"
+            required_values[aws-api-key]="${AWS_API_KEY}"
+            ;;
+          aws_role) ;;
+          *)
+            echo "::error::Unsupported anthropic-auth-mode '${ANTHROPIC_AUTH_MODE}'; use 'api_key' or 'aws_role'."
+            exit 1
+            ;;
+        esac
 
         for input_name in "${!required_values[@]}"; do
           value="${required_values[$input_name]}"
@@ -200,6 +229,10 @@ runs:
             echo "::error::Mythos requires mythos-retention-acknowledged=true (mandatory 30-day retention; no ZDR)."
             exit 1
           fi
+          if [[ "${ANTHROPIC_AUTH_MODE}" != "api_key" ]]; then
+            echo "::error::claude-mythos-5 does not yet support anthropic-auth-mode=${ANTHROPIC_AUTH_MODE}; the isolated gVisor sandbox only forwards Claude Platform on AWS API-key credentials into its container. Use anthropic-auth-mode=api_key for Mythos runs."
+            exit 1
+          fi
         fi
 
         case "${AUTH_METHOD}" in
@@ -230,9 +263,15 @@ runs:
       env:
         # These environment overlays take precedence over agent/config.toml.
         # Keep secrets process-scoped rather than writing them to the checkout.
-        VULNHUNT_ANTHROPIC_AUTH_MODE: anthropic_aws
+        # aws_role mode signs Bedrock requests with whatever AWS credentials
+        # are already present in this job's process environment (see the
+        # calling workflow's "Assume AWS role for Claude on Bedrock" step, or
+        # a self-hosted runner's instance/task role) — aws-workspace-id/
+        # aws-api-key are unused and typically empty in that mode.
+        VULNHUNT_ANTHROPIC_AUTH_MODE: ${{ inputs.anthropic-auth-mode == 'aws_role' && 'bedrock_sigv4' || 'anthropic_aws' }}
         VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
         VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
+        VULNHUNT_ANTHROPIC_AWS_REGION: ${{ inputs.aws-region }}
         VULNHUNT_ANTHROPIC_MODEL: ${{ inputs.model }}
         VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.scan-token }}
         VULNHUNT_GITHUB_REPORTS_TOKEN: ${{ inputs.reports-token }}

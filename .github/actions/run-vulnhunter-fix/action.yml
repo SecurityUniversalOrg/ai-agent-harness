@@ -18,10 +18,17 @@ inputs:
   mythos-retention-acknowledged:
     required: false
     default: "false"
+  anthropic-auth-mode:
+    description: "'api_key' (Claude Platform on AWS workspace API key, default) or 'aws_role' (Bedrock, signed with AWS credentials already present in the job environment). Not supported for model=claude-mythos-5."
+    required: false
+    default: api_key
   aws-workspace-id:
-    required: true
+    required: false
   aws-api-key:
-    required: true
+    required: false
+  aws-region:
+    required: false
+    default: us-east-1
   fix-token:
     required: true
   delivery-enabled:
@@ -85,10 +92,15 @@ runs:
         MODEL: ${{ inputs.model }}
         DELIVERY_ENABLED: ${{ inputs.delivery-enabled }}
         TEST_POLICY: ${{ inputs.test-policy }}
-        VULNHUNT_ANTHROPIC_AUTH_MODE: anthropic_aws
+        # aws_role mode signs Bedrock requests with whatever AWS credentials
+        # are already present in this job's process environment (see the
+        # calling workflow's "Assume AWS role for Claude on Bedrock" step, or
+        # a self-hosted runner's instance/task role) — aws-workspace-id/
+        # aws-api-key are unused and typically empty in that mode.
+        VULNHUNT_ANTHROPIC_AUTH_MODE: ${{ inputs.anthropic-auth-mode == 'aws_role' && 'bedrock_sigv4' || 'anthropic_aws' }}
         VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
         VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
-        VULNHUNT_ANTHROPIC_AWS_REGION: us-east-1
+        VULNHUNT_ANTHROPIC_AWS_REGION: ${{ inputs.aws-region }}
         VULNHUNT_ANTHROPIC_MODEL: ${{ inputs.model }}
         VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.fix-token }}
         VULNHUNT_GITHUB_HOST: ${{ inputs.github-host }}
@@ -110,8 +122,8 @@ runs:
       run: |
         set -euo pipefail
 
-        echo "::add-mask::${VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID}"
-        echo "::add-mask::${VULNHUNT_ANTHROPIC_AWS_API_KEY}"
+        [[ -z "${VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID}" ]] || echo "::add-mask::${VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID}"
+        [[ -z "${VULNHUNT_ANTHROPIC_AWS_API_KEY}" ]] || echo "::add-mask::${VULNHUNT_ANTHROPIC_AWS_API_KEY}"
         echo "::add-mask::${VULNHUNT_GITHUB_SCAN_TOKEN}"
         [[ -x "${PYTHON_PATH}" && -f "${CONFIG_PATH}" && -d "${REPORT_DIRECTORY}" && -d "${SCRATCH_BASE}" ]] || {
           echo "::error::Fix execution received an invalid prepared path."

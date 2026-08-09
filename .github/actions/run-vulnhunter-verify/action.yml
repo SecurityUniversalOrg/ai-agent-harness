@@ -25,10 +25,17 @@ inputs:
   reports-branch:
     required: false
     default: main
+  anthropic-auth-mode:
+    description: "'api_key' (Claude Platform on AWS workspace API key, default) or 'aws_role' (Bedrock, signed with AWS credentials already present in the job environment). Not supported for model=claude-mythos-5."
+    required: false
+    default: api_key
   aws-workspace-id:
-    required: true
+    required: false
   aws-api-key:
-    required: true
+    required: false
+  aws-region:
+    required: false
+    default: us-east-1
   verify-token:
     required: true
   reports-token:
@@ -61,10 +68,17 @@ runs:
         COMMIT: ${{ inputs.commit }}
         POST_COMMENTS: ${{ inputs.post-comments }}
         REOPEN_NONFIXED: ${{ inputs.reopen-nonfixed }}
-        VULNHUNT_ANTHROPIC_AUTH_MODE: anthropic_aws
+        # aws_role mode signs Bedrock requests with whatever AWS credentials
+        # are already present in this job's process environment (see the
+        # calling workflow's "Assume AWS role for Claude on Bedrock" step, or
+        # a self-hosted runner's instance/task role) — aws-workspace-id/
+        # aws-api-key are unused and typically empty in that mode. Not
+        # supported for model=claude-mythos-5 (enforced upstream in
+        # prepare-vulnhunter-verify).
+        VULNHUNT_ANTHROPIC_AUTH_MODE: ${{ inputs.anthropic-auth-mode == 'aws_role' && 'bedrock_sigv4' || 'anthropic_aws' }}
         VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID: ${{ inputs.aws-workspace-id }}
         VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
-        VULNHUNT_ANTHROPIC_AWS_REGION: us-east-1
+        VULNHUNT_ANTHROPIC_AWS_REGION: ${{ inputs.aws-region }}
         VULNHUNT_ANTHROPIC_MODEL: ${{ inputs.model }}
         VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.verify-token }}
         VULNHUNT_GITHUB_HOST: ${{ inputs.github-host }}
@@ -79,9 +93,12 @@ runs:
       run: |
         set -euo pipefail
 
-        for secret_value in "${VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID}" "${VULNHUNT_ANTHROPIC_AWS_API_KEY}" "${VULNHUNT_GITHUB_SCAN_TOKEN}" "${VULNHUNT_GITHUB_REPORTS_TOKEN}"; do
+        for secret_value in "${VULNHUNT_GITHUB_SCAN_TOKEN}" "${VULNHUNT_GITHUB_REPORTS_TOKEN}"; do
           [[ -n "${secret_value}" ]] || { echo "::error::Verify credentials must not be empty."; exit 64; }
           echo "::add-mask::${secret_value}"
+        done
+        for secret_value in "${VULNHUNT_ANTHROPIC_AWS_WORKSPACE_ID}" "${VULNHUNT_ANTHROPIC_AWS_API_KEY}"; do
+          [[ -z "${secret_value}" ]] || echo "::add-mask::${secret_value}"
         done
         [[ -x "${PYTHON_PATH}" && -f "${CONFIG_PATH}" ]] || { echo "::error::Verify runtime is not prepared."; exit 64; }
         [[ -z "${COMMIT}" || "${COMMIT}" =~ ^[0-9a-fA-F]{7,64}$ ]] || { echo "::error::commit must be a 7-64 character hexadecimal SHA."; exit 64; }
