@@ -159,6 +159,20 @@ that mints short-lived, automatically-scoped, automatically-revoked tokens
 for every run — no long-lived secret to rotate, and every minted token is
 visible in the App's own installation audit trail.
 
+> **Token lifetime**: installation tokens are valid for exactly 1 hour —
+> GitHub's API has no option for longer. Scan's Mythos path handles this
+> automatically: since its scan step can run for hours and its delivery step
+> runs strictly afterward, `claude-agent-sec-scan` re-mints fresh
+> `scan-token`/`reports-token` immediately before delivery instead of
+> reusing the ones minted at job start. Fix and verify don't need this —
+> under Mythos they use their tokens once, immediately after minting, and
+> never again (delivery is disabled entirely under Mythos for both). If a
+> non-Mythos (Opus) scan run's *scan phase alone* exceeds an hour, its
+> token can still go stale — that path has no discrete "deliver" step to
+> refresh at, since scan/publish/issues all happen inside one continuous
+> process; prefer `pat` for Opus scans you expect to run long, or keep
+> individual repo scans under an hour.
+
 ### 1. Create the App
 
 1. GitHub → your profile photo (or org settings, if this is an
@@ -311,6 +325,34 @@ variables → Actions → Variables** (repository or organization level):
   (`ghp_...abcd (len=40)`) so you can compare it against what you configured
   — a mismatch usually means a stale secret value or the wrong secret scope
   shadowing the one you meant to set.
+- **`[github] reports_token failed preflight ... (status 401)` (or
+  `scan_token`) inside "Deliver Mythos results" on a long-running Mythos
+  scan** — GitHub App installation tokens are hard-capped at **1 hour** by
+  GitHub's API; there is no way to mint a longer-lived one. If your scan
+  target takes longer than that, the `scan-token`/`reports-token` minted at
+  the start of the job (before the multi-hour gVisor scan step) will have
+  expired by the time delivery runs. This is expected and already handled
+  for `github_auth_method=github_app`: `claude-agent-sec-scan` re-mints
+  fresh, identically-scoped tokens immediately before "Deliver Mythos
+  results" runs (see `Refresh scan-scoped GitHub App installation token`
+  and `Refresh reports-scoped GitHub App installation token` in that
+  action's log). If you're still seeing this:
+  - Confirm `github_auth_method` was actually `github_app` for the run (a
+    `pat` run has no refresh step, since PATs don't expire on a fixed short
+    window — check the resolved value in the "Validate GitHub
+    authentication inputs" step's log).
+  - Confirm the App is installed with access to whatever repo the *stale*
+    token role needs (`scan-token` → the scanned repo; `reports-token` →
+    the reports destination) — the refresh step mints against the same
+    scope the original token used, so a missing installation fails the
+    refresh too, just with a different error (see the
+    `actions/create-github-app-token` 404 entry above).
+  - `pat`-based tokens genuinely cannot be refreshed mid-job by this
+    workflow — a PAT that's valid at job start stays valid for its whole
+    configured lifetime, so this specific failure mode is `github_app`-only.
+    If you're deliberately using `pat` and still hit a 401 partway through a
+    long run, the PAT itself expired or was revoked — check its expiration
+    date, not the workflow.
 
 ## Security recommendations
 
