@@ -227,8 +227,9 @@ findings whose fix doesn't need one.
 
 | Secret | Used by | Minimum purpose |
 |---|---|---|
-| `ANTHROPIC_AWS_WORKSPACE_ID` | Fix and verify model sessions | Claude Platform workspace selection |
-| `ANTHROPIC_AWS_API_KEY` | Fix and verify model sessions | Claude Platform authentication |
+| `ANTHROPIC_AWS_WORKSPACE_ID` | Fix and verify model sessions (`anthropic_auth_method=api_key`) | Claude Platform workspace selection |
+| `ANTHROPIC_AWS_API_KEY` | Fix and verify model sessions (`anthropic_auth_method=api_key`) | Claude Platform authentication |
+| `ANTHROPIC_AWS_ROLE_ARN` | Fix and verify model sessions (`anthropic_auth_method=aws_role`) | IAM role assumed via OIDC; Bedrock requests signed with its temporary credentials |
 | `VULNHUNT_GITHUB_REPORTS_TOKEN` | Exact report checkout or named report download | Read-only central reports contents |
 | `VULNHUNT_GITHUB_FIX_TOKEN` | Fix trusted clone and optional model delivery | Private target read; private-fork administration, contents, issues, and PR write only when delivery is approved |
 | `VULNHUNT_GITHUB_VERIFY_TOKEN` | Verify intake, evidence fetch, clone, and optional issue mutation | Target contents/metadata/issues read; issues write only when comments or reopen are enabled |
@@ -283,6 +284,46 @@ Both `VULNHUNT_GITHUB_FIX_TOKEN`/`VULNHUNT_GITHUB_VERIFY_TOKEN` and
   token used by the same trusted host process that already holds PAT-sourced tokens
   outside the gVisor container (see [Mythos gVisor execution](#mythos-gvisor-execution)).
   Nothing about token provenance changes what does or doesn't reach the model container.
+
+### Anthropic authentication: API key or AWS role
+
+Independent of the GitHub token choice above, `ANTHROPIC_AWS_WORKSPACE_ID`/
+`ANTHROPIC_AWS_API_KEY` can likewise be replaced by short-lived, OIDC-derived AWS
+credentials, selected per run by the `anthropic_auth_method` input (`api_key`, the
+default, or `aws_role`). Setup instructions live in
+[`.github/workflows/README.md`](../../.github/workflows/README.md#anthropic-credentials-api-key-or-aws-role);
+this section covers the design rationale.
+
+- **`api_key`** — the workflow reads `ANTHROPIC_AWS_WORKSPACE_ID`/`ANTHROPIC_AWS_API_KEY`
+  straight out of the named secrets, exactly as before, and the agent runs with
+  `[anthropic].auth_mode = "anthropic_aws"`.
+- **`aws_role`** — before the scan/fix/verify composite action runs, the workflow uses
+  `aws-actions/configure-aws-credentials` (job-level `permissions: id-token: write`) to
+  assume an operator-configured IAM role (`ANTHROPIC_AWS_ROLE_ARN`) via GitHub's OIDC
+  identity provider. The resulting temporary credentials land in the job's process
+  environment as ordinary `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`
+  variables; no composite action step reads or forwards them explicitly. The agent is
+  switched to `[anthropic].auth_mode = "bedrock_sigv4"` (already implemented in
+  `agent/auth.py`/`agent/build_settings.py` — see
+  [`vulnhunter-agent/README.md`](../../vulnhunter-agent/README.md#authenticating-to-claude--anthropic-auth_mode)),
+  in which the bundled Claude Code CLI signs Bedrock requests directly with the standard
+  AWS credential chain. No static Anthropic credential ever enters secret storage.
+
+  A "Validate Anthropic authentication inputs" step runs first, mirroring the GitHub
+  auth validation above, and fails the job immediately if the credentials the selected
+  method needs aren't present.
+
+  **Not supported under Mythos.** The isolated gVisor container's egress proxy has a
+  single fixed Squid ACL entry — the Claude Platform on AWS host
+  (`aws-external-anthropic.us-east-1.api.aws`) — and `scripts/run_mythos_sandbox.sh` (and
+  its fix/verify equivalents) hard-code `anthropic_aws` into the container's env-file
+  regardless of the workflow's `anthropic_auth_method`. Extending Mythos to `aws_role`
+  would mean widening that proxy ACL to the regional Bedrock/STS endpoints and forwarding
+  short-lived AWS credentials into the container — a deliberately separate, security-
+  reviewed change, not a drop-in credential swap. Every workflow validates this
+  combination up front (`claude-agent-sec-scan`'s own "Validate configuration" step, and
+  `prepare-vulnhunter-fix`/`prepare-vulnhunter-verify`) and fails fast rather than
+  silently ignoring `aws_role` under Mythos.
 
 ## Outcomes and artifacts
 

@@ -27,6 +27,10 @@ inputs:
     description: Explicit acknowledgement that Mythos requests have mandatory 30-day retention.
     required: false
     default: "false"
+  anthropic-auth-mode:
+    description: "'api_key' (Claude Platform on AWS workspace API key, default) or 'aws_role' (Bedrock via AWS credentials already present in the job environment). Not supported for model=claude-mythos-5."
+    required: false
+    default: api_key
   post-comments:
     description: Allow verified disposition comments to be posted.
     required: false
@@ -66,6 +70,7 @@ runs:
         GITHUB_SERVER_URL_INPUT: ${{ inputs.github-server-url }}
         MODEL: ${{ inputs.model }}
         MYTHOS_RETENTION_ACKNOWLEDGED: ${{ inputs.mythos-retention-acknowledged }}
+        ANTHROPIC_AUTH_MODE: ${{ inputs.anthropic-auth-mode }}
         POST_COMMENTS: ${{ inputs.post-comments }}
         REOPEN_NONFIXED: ${{ inputs.reopen-nonfixed }}
       run: |
@@ -78,6 +83,10 @@ runs:
         case "${MODEL}" in
           claude-opus-4-7|claude-opus-4-8|claude-mythos-5) ;;
           *) echo "::error::Unsupported verify model: ${MODEL}"; exit 1 ;;
+        esac
+        case "${ANTHROPIC_AUTH_MODE}" in
+          api_key|aws_role) ;;
+          *) echo "::error::Unsupported anthropic-auth-mode '${ANTHROPIC_AUTH_MODE}'; use 'api_key' or 'aws_role'."; exit 1 ;;
         esac
         for toggle in "${POST_COMMENTS}" "${REOPEN_NONFIXED}"; do
           [[ "${toggle}" == "true" || "${toggle}" == "false" ]] || {
@@ -100,6 +109,10 @@ runs:
           # in the Python agent. Fail fast here too.
           [[ "${POST_COMMENTS}" == "false" ]] || {
             echo "::error::claude-mythos-5 verify mode never posts; post-comments must be false."
+            exit 1
+          }
+          [[ "${ANTHROPIC_AUTH_MODE}" == "api_key" ]] || {
+            echo "::error::claude-mythos-5 does not yet support anthropic-auth-mode=${ANTHROPIC_AUTH_MODE}; the isolated gVisor sandbox only forwards Claude Platform on AWS API-key credentials into its container. Use anthropic-auth-mode=api_key for Mythos runs."
             exit 1
           }
         fi

@@ -27,11 +27,19 @@ rationale and exactly how each workflow consumes these tokens, see
 > workflow working, then `github_app` once you're ready to stop maintaining a
 > long-lived credential.
 
+Independently, every workflow *also* has an `anthropic_auth_method` input
+selecting how the agent itself authenticates to Claude — `api_key` (the
+default, a long-lived Claude Platform on AWS workspace API key) or
+`aws_role` (no static credential at all: the job assumes an AWS IAM role via
+OIDC and the agent signs Bedrock requests with those temporary credentials).
+This is completely independent of `github_auth_method` above — pick whichever
+combination you want per workflow.
+
 ## Table of contents
 
 - [Quick reference](#quick-reference)
 - [Which token does what](#which-token-does-what)
-- [Anthropic credentials (both auth methods need these)](#anthropic-credentials-both-auth-methods-need-these)
+- [Anthropic credentials: API key or AWS role](#anthropic-credentials-api-key-or-aws-role)
 - [Option A: Personal Access Token (PAT) setup](#option-a-personal-access-token-pat-setup)
 - [Option B: GitHub App setup](#option-b-github-app-setup)
 - [Where to put secrets: repository, environment, or organization](#where-to-put-secrets-repository-environment-or-organization)
@@ -48,10 +56,12 @@ rationale and exactly how each workflow consumes these tokens, see
 | Fix | `VULNHUNT_GITHUB_FIX_TOKEN`, `VULNHUNT_GITHUB_REPORTS_TOKEN` | `VULNHUNT_GITHUB_APP_ID`, `VULNHUNT_GITHUB_APP_PRIVATE_KEY` |
 | Verify | `VULNHUNT_GITHUB_VERIFY_TOKEN`, `VULNHUNT_GITHUB_REPORTS_TOKEN` | `VULNHUNT_GITHUB_APP_ID`, `VULNHUNT_GITHUB_APP_PRIVATE_KEY` |
 
-All three workflows additionally need `ANTHROPIC_AWS_WORKSPACE_ID` and
-`ANTHROPIC_AWS_API_KEY` (see
-[below](#anthropic-credentials-both-auth-methods-need-these)) — those are
-unrelated to GitHub authentication and identical either way.
+All three workflows additionally need Anthropic credentials — either
+`ANTHROPIC_AWS_WORKSPACE_ID` + `ANTHROPIC_AWS_API_KEY`, or
+`ANTHROPIC_AWS_ROLE_ARN`, selected per run by the `anthropic_auth_method`
+input (see
+[below](#anthropic-credentials-api-key-or-aws-role)) — this is completely
+unrelated to `github_auth_method`/GitHub authentication.
 
 Every workflow validates its inputs in a "Validate GitHub authentication
 inputs" step that runs *before* any clone or checkout. If you pick
@@ -103,14 +113,70 @@ sandbox scripts and workflow wiring for GitHub App auth have not been
 exercised end-to-end against live fork creation — treat the first
 delivery-enabled + `github_app` run as a real test, not an assumption.
 
-## Anthropic credentials (both auth methods need these)
+## Anthropic credentials: API key or AWS role
 
-Unrelated to GitHub auth, but required either way:
+Unrelated to GitHub auth (see [above](#which-token-does-what) for that), but
+required either way. Every workflow's `anthropic_auth_method` input picks
+between two ways to authenticate to Claude:
+
+| `anthropic_auth_method` | How it authenticates | What to set |
+|---|---|---|
+| `api_key` *(default)* | Claude Platform on AWS with a workspace-scoped API key | `ANTHROPIC_AWS_WORKSPACE_ID` + `ANTHROPIC_AWS_API_KEY` secrets |
+| `aws_role` | Amazon Bedrock, calling `aws-actions/configure-aws-credentials` to assume an IAM role via OIDC before the scan/fix/verify step runs — no long-lived credential in secret storage at all | `ANTHROPIC_AWS_ROLE_ARN` secret |
+
+Both methods also read the `VULNHUNT_ANTHROPIC_AWS_REGION` repository/org
+variable (default `us-east-1`) for the AWS region.
+
+> **Mythos (`model: claude-mythos-5`) does not support `aws_role` yet.** The
+> isolated gVisor container only forwards Claude Platform on AWS API-key
+> credentials into its egress-restricted network — see
+> [`vulnhunter-agent/README.md`](../../vulnhunter-agent/README.md#authenticating-to-claude--anthropic-auth_mode)
+> for why. Every workflow validates this combination up front and fails fast
+> with a clear `::error::` rather than a confusing runtime failure. Use
+> `anthropic_auth_method=api_key` for any Mythos run.
+
+### Option A: API key (`anthropic_auth_method=api_key`)
+
+The simplest way to get a workflow running, and the default. Create a Claude
+Platform on AWS workspace, generate a workspace API key, and store both
+values as secrets:
 
 | Secret | Purpose |
 |---|---|
 | `ANTHROPIC_AWS_WORKSPACE_ID` | Claude Platform on AWS workspace selection |
 | `ANTHROPIC_AWS_API_KEY` | Claude Platform on AWS authentication |
+
+This is a long-lived credential — rotate it periodically, same as a PAT.
+
+### Option B: AWS role (`anthropic_auth_method=aws_role`)
+
+No static Anthropic credential enters secret storage at all. The job assumes
+an IAM role via GitHub's OIDC identity provider (the same mechanism
+`aws-actions/configure-aws-credentials` uses everywhere else), and the
+bundled Claude Code CLI signs each Bedrock request directly with the
+resulting temporary credentials (SigV4) — see
+[`vulnhunter-agent/README.md`](../../vulnhunter-agent/README.md#authenticating-to-claude--anthropic-auth_mode)'s
+`bedrock_sigv4` auth mode for how the agent itself consumes this.
+
+1. In AWS IAM, [add GitHub's OIDC provider](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services#adding-the-identity-provider-to-aws)
+   (`token.actions.githubusercontent.com`) to your account, if it isn't
+   already there.
+2. Create an IAM role with a trust policy scoped to this repository (and,
+   ideally, the specific workflow ref) — GitHub's docs above show the exact
+   trust-policy condition keys. Grant it only `bedrock:InvokeModel` and
+   `bedrock:InvokeModelWithResponseStream` on the Claude model ARNs you use,
+   in the region(s) you scan from. No other AWS permissions are needed.
+3. Store the role's ARN as the `ANTHROPIC_AWS_ROLE_ARN` secret (see
+   [where to put secrets](#where-to-put-secrets-repository-environment-or-organization)
+   below for exactly where).
+4. Set `anthropic_auth_method: aws_role` on dispatch (or, for scan's
+   scheduled runs, set the `VULNHUNT_ANTHROPIC_AUTH_METHOD` repository/org
+   variable — scheduled runs can't read a dispatch input, mirroring how
+   `VULNHUNT_GITHUB_AUTH_METHOD` works for GitHub auth).
+
+Each workflow's job already declares `permissions: id-token: write` so the
+OIDC assumption step can request a token; you don't need to add that
+yourself.
 
 ## Option A: Personal Access Token (PAT) setup
 
@@ -259,29 +325,33 @@ to reach.
   environment today, so its secrets must be repository or organization
   secrets.
 - Any secret needed by more than one workflow (in particular
-  `VULNHUNT_GITHUB_APP_ID`/`VULNHUNT_GITHUB_APP_PRIVATE_KEY` if you use one
-  App everywhere) can be set once as an **organization secret** scoped to
-  this repository, instead of duplicating it into every environment.
+  `VULNHUNT_GITHUB_APP_ID`/`VULNHUNT_GITHUB_APP_PRIVATE_KEY`, or
+  `ANTHROPIC_AWS_ROLE_ARN`, if you use one App/role everywhere) can be set
+  once as an **organization secret** scoped to this repository, instead of
+  duplicating it into every environment.
 
 ## Per-workflow dispatch checklist
 
 **Scan** (`workflow_dispatch` or the weekly `schedule`):
 - [ ] `config/repos.csv` lists every repo to scan
 - [ ] Either `VULNHUNT_GITHUB_SCAN_TOKEN` + `VULNHUNT_GITHUB_REPORTS_TOKEN`, or `VULNHUNT_GITHUB_APP_ID` + `VULNHUNT_GITHUB_APP_PRIVATE_KEY`, are set
-- [ ] For scheduled (non-dispatch) runs: set the repository variable `VULNHUNT_GITHUB_AUTH_METHOD` if you want scheduled runs to use `github_app` — scheduled runs can't read a dispatch input, so they fall back to this variable (default `pat`)
-- [ ] If using Mythos (`model: claude-mythos-5`), also set `mythos_retention_acknowledged: true` and provision a `gvisor`-labeled runner
+- [ ] Either `ANTHROPIC_AWS_WORKSPACE_ID` + `ANTHROPIC_AWS_API_KEY`, or `ANTHROPIC_AWS_ROLE_ARN`, are set
+- [ ] For scheduled (non-dispatch) runs: set the repository variable `VULNHUNT_GITHUB_AUTH_METHOD` if you want scheduled runs to use `github_app`, and/or `VULNHUNT_ANTHROPIC_AUTH_METHOD` if you want them to use `aws_role` — scheduled runs can't read a dispatch input, so they fall back to these variables (default `pat` / `api_key`)
+- [ ] If using Mythos (`model: claude-mythos-5`), also set `mythos_retention_acknowledged: true`, provision a `gvisor`-labeled runner, and leave `anthropic_auth_method` at `api_key` (`aws_role` isn't supported for Mythos)
 
 **Fix** (`workflow_dispatch` or `workflow_call`):
 - [ ] A published report exists (`reports_repository` + `reports_ref` + `results_path` point at it)
 - [ ] Either `VULNHUNT_GITHUB_FIX_TOKEN` + `VULNHUNT_GITHUB_REPORTS_TOKEN`, or `VULNHUNT_GITHUB_APP_ID` + `VULNHUNT_GITHUB_APP_PRIVATE_KEY`, are set as **environment secrets on `vulnhunter-fix`**
+- [ ] Either `ANTHROPIC_AWS_WORKSPACE_ID` + `ANTHROPIC_AWS_API_KEY`, or `ANTHROPIC_AWS_ROLE_ARN`, are set as **environment secrets on `vulnhunter-fix`**
 - [ ] `delivery_enabled` left `false` for a first run; see [Fork delivery](#fork-delivery-a-two-sided-requirement) before ever setting it `true`
-- [ ] If using Mythos, also set `mythos_retention_acknowledged: true`
+- [ ] If using Mythos, also set `mythos_retention_acknowledged: true` and leave `anthropic_auth_method` at `api_key`
 
 **Verify** (`workflow_dispatch` or `workflow_call`):
 - [ ] `VULNHUNT_TRUSTED_ISSUE_AUTHORS` (repository/org variable) names the scanner bot or App login that created the findings you're verifying
 - [ ] Either `VULNHUNT_GITHUB_VERIFY_TOKEN` + `VULNHUNT_GITHUB_REPORTS_TOKEN`, or `VULNHUNT_GITHUB_APP_ID` + `VULNHUNT_GITHUB_APP_PRIVATE_KEY`, are set as **environment secrets on `vulnhunter-verify`**
+- [ ] Either `ANTHROPIC_AWS_WORKSPACE_ID` + `ANTHROPIC_AWS_API_KEY`, or `ANTHROPIC_AWS_ROLE_ARN`, are set as **environment secrets on `vulnhunter-verify`**
 - [ ] `post_comments`/`reopen_nonfixed` left `false` for a first run
-- [ ] If using Mythos, also set `mythos_retention_acknowledged: true`
+- [ ] If using Mythos, also set `mythos_retention_acknowledged: true` and leave `anthropic_auth_method` at `api_key`
 
 ## Repository/organization variables reference
 
@@ -291,6 +361,8 @@ variables → Actions → Variables** (repository or organization level):
 | Variable | Used by | Purpose |
 |---|---|---|
 | `VULNHUNT_GITHUB_AUTH_METHOD` | Scan (scheduled runs only) | `pat` or `github_app`; `workflow_dispatch` runs use the dispatch input instead |
+| `VULNHUNT_ANTHROPIC_AUTH_METHOD` | Scan (scheduled runs only) | `api_key` or `aws_role`; `workflow_dispatch` runs use the dispatch input instead |
+| `VULNHUNT_ANTHROPIC_AWS_REGION` | All three | AWS region for Bedrock/Claude Platform on AWS (default `us-east-1`) |
 | `VULNHUNT_REPORTS_REPOSITORY` | Scan | Central reports repo URL (defaults to this repo) |
 | `VULNHUNT_REPORTS_BRANCH` | Scan | Central reports branch (default `main`) |
 | `VULNHUNT_PUBLISH_RESULTS` | Scan (scheduled runs only) | `false` to disable report publishing on schedule |
@@ -309,6 +381,27 @@ variables → Actions → Variables** (repository or organization level):
   vs repository — see [above](#where-to-put-secrets-repository-environment-or-organization)).
 - **`::error::github_auth_method=github_app requires the ... secrets.`** —
   same, for `VULNHUNT_GITHUB_APP_ID`/`VULNHUNT_GITHUB_APP_PRIVATE_KEY`.
+- **`::error::anthropic_auth_method=api_key requires the ... secrets.`** /
+  **`::error::anthropic_auth_method=aws_role requires the ANTHROPIC_AWS_ROLE_ARN
+  secret.`** — same idea, for the Anthropic credential pair: check
+  `ANTHROPIC_AWS_WORKSPACE_ID`/`ANTHROPIC_AWS_API_KEY` (api_key) or
+  `ANTHROPIC_AWS_ROLE_ARN` (aws_role) are set at the right scope.
+- **`::error::claude-mythos-5 does not yet support anthropic-auth-mode=aws_role...`**
+  — Mythos's isolated gVisor container only forwards Claude Platform on AWS
+  API-key credentials into its egress-restricted network; switch that
+  dispatch's `anthropic_auth_method` back to `api_key`.
+- **`aws-actions/configure-aws-credentials` fails with "Not authorized to
+  perform sts:AssumeRoleWithWebIdentity"** — the IAM role's trust policy
+  doesn't match this repository/workflow, or the job is missing
+  `permissions: id-token: write` (every workflow here already declares it at
+  the job level — check you didn't override `permissions:` in a fork or
+  local copy). Recheck the trust-policy condition keys against
+  [GitHub's OIDC docs](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services).
+- **Bedrock calls fail with `AccessDeniedException` under `aws_role`** — the
+  assumed role is missing `bedrock:InvokeModel`/
+  `bedrock:InvokeModelWithResponseStream` on the model ARN, or
+  `VULNHUNT_ANTHROPIC_AWS_REGION` points at a region where that model isn't
+  enabled for your account.
 - **`actions/create-github-app-token` fails with a 404 or "resource not
   accessible"** — the App isn't installed on the account/repo the run is
   trying to scope a token to. Recheck [step 3](#3-install-the-app);
@@ -358,6 +451,12 @@ variables → Actions → Variables** (repository or organization level):
 
 - Prefer `github_app` for any workflow you run routinely — it removes a
   long-lived credential from secret storage entirely.
+- Prefer `anthropic_auth_method=aws_role` for the same reason on the
+  Anthropic side — no long-lived `ANTHROPIC_AWS_API_KEY` sits in secret
+  storage, and every credential is scoped to one job run via OIDC. Scope the
+  IAM role's trust policy to this repository (and ideally the specific
+  workflow ref) and grant it nothing beyond `bedrock:InvokeModel`/
+  `bedrock:InvokeModelWithResponseStream`.
 - If you do use `pat`, prefer fine-grained tokens scoped to exactly the
   repos in the [table above](#which-token-does-what), set the shortest
   expiration you can tolerate, and rotate before it lapses.
