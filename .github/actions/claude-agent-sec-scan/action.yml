@@ -19,6 +19,28 @@ inputs:
     description: GitHub token used to read and publish VulnHunter reports
     required: false
 
+  github-auth-method:
+    description: >
+      How scan-token/reports-token were obtained: 'pat' (static secret, the
+      default) or 'github_app' (minted installation token). Mythos re-mints
+      fresh scan/reports tokens immediately before "Deliver Mythos results"
+      only when this is 'github_app' — GitHub App installation tokens are
+      hard-capped at 1 hour by GitHub's API, and the preceding gVisor scan
+      step can run far longer than that. 'pat' tokens are unaffected: they
+      don't expire on a fixed short window, so no refresh is attempted.
+    required: false
+    default: pat
+
+  app-id:
+    description: GitHub App ID (or client ID), required when github-auth-method=github_app
+    required: false
+    default: ""
+
+  app-private-key:
+    description: GitHub App private key (PEM), required when github-auth-method=github_app
+    required: false
+    default: ""
+
   publish-results:
     description: Publish the report to the central reports repository
     required: false
@@ -93,6 +115,9 @@ runs:
         SUBMIT_REPO_ISSUES: ${{ inputs.submit-repo-issues }}
         REPORTS_REPOSITORY_URL: ${{ inputs.reports-repository-url || format('{0}/{1}', github.server_url, github.repository) }}
         REPORTS_BRANCH: ${{ inputs.reports-branch }}
+        AUTH_METHOD: ${{ inputs.github-auth-method }}
+        APP_ID: ${{ inputs.app-id }}
+        APP_PRIVATE_KEY: ${{ inputs.app-private-key }}
       run: |
         set -euo pipefail
 
@@ -176,6 +201,20 @@ runs:
             exit 1
           fi
         fi
+
+        case "${AUTH_METHOD}" in
+          pat) ;;
+          github_app)
+            if [[ -z "${APP_ID}" || -z "${APP_PRIVATE_KEY}" ]]; then
+              echo "::error::github-auth-method=github_app requires the app-id and app-private-key inputs."
+              exit 1
+            fi
+            ;;
+          *)
+            echo "::error::Unsupported github-auth-method '${AUTH_METHOD}'; use 'pat' or 'github_app'."
+            exit 1
+            ;;
+        esac
 
         echo "Delivery configuration: publish-results=${PUBLISH_RESULTS}, submit-repo-issues=${SUBMIT_REPO_ISSUES}"
         echo "Target branch: ${TARGET_BRANCH:-<repository default>}"
@@ -279,6 +318,55 @@ runs:
         chmod +x "${GITHUB_ACTION_PATH}/../../../scripts/run_mythos_sandbox.sh"
         "${GITHUB_ACTION_PATH}/../../../scripts/run_mythos_sandbox.sh"
 
+    # GitHub App installation tokens are hard-capped at 1 hour by GitHub's API
+    # (there is no way to mint a longer-lived one) and the preceding gVisor
+    # scan can run far longer than that. The scan-token/reports-token minted
+    # by the calling workflow before this composite action started are
+    # therefore likely expired by the time delivery runs. Re-mint fresh ones
+    # right before they're used, scoped identically to how the calling
+    # workflow scoped the originals — never wider. 'pat' tokens don't expire
+    # on a fixed short window, so this is skipped entirely for that method.
+    - name: Resolve GitHub App token scopes for delivery
+      id: delivery-app-scope
+      if: inputs.model == 'claude-mythos-5' && inputs.github-auth-method == 'github_app' && (inputs.publish-results == 'true' || inputs.submit-repo-issues == 'true')
+      shell: bash
+      env:
+        TARGET_REPOSITORY_URL: ${{ inputs.repository-url }}
+        REPORTS_REPOSITORY_URL: ${{ inputs.reports-repository-url || format('{0}/{1}', github.server_url, github.repository) }}
+      run: |
+        set -euo pipefail
+        # Both URLs are scheme://host/owner/repo; strip scheme and host.
+        target_path="${TARGET_REPOSITORY_URL#*://}"
+        target_path="${target_path#*/}"
+        reports_path="${REPORTS_REPOSITORY_URL#*://}"
+        reports_path="${reports_path#*/}"
+        {
+          echo "target-owner=${target_path%%/*}"
+          echo "target-repo=${target_path#*/}"
+          echo "reports-owner=${reports_path%%/*}"
+          echo "reports-repo=${reports_path#*/}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Refresh scan-scoped GitHub App installation token
+      id: refresh-scan-token
+      if: inputs.model == 'claude-mythos-5' && inputs.github-auth-method == 'github_app' && inputs.submit-repo-issues == 'true'
+      uses: actions/create-github-app-token@v2
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.app-private-key }}
+        owner: ${{ steps.delivery-app-scope.outputs.target-owner }}
+        repositories: ${{ steps.delivery-app-scope.outputs.target-repo }}
+
+    - name: Refresh reports-scoped GitHub App installation token
+      id: refresh-reports-token
+      if: inputs.model == 'claude-mythos-5' && inputs.github-auth-method == 'github_app' && inputs.publish-results == 'true'
+      uses: actions/create-github-app-token@v2
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.app-private-key }}
+        owner: ${{ steps.delivery-app-scope.outputs.reports-owner }}
+        repositories: ${{ steps.delivery-app-scope.outputs.reports-repo }}
+
     - name: Deliver Mythos results
       if: inputs.model == 'claude-mythos-5' && (inputs.publish-results == 'true' || inputs.submit-repo-issues == 'true')
       shell: bash
@@ -292,8 +380,8 @@ runs:
         VULNHUNT_ANTHROPIC_AWS_API_KEY: ${{ inputs.aws-api-key }}
         VULNHUNT_ANTHROPIC_AWS_REGION: us-east-1
         VULNHUNT_ANTHROPIC_MODEL: claude-opus-4-8
-        VULNHUNT_GITHUB_SCAN_TOKEN: ${{ inputs.scan-token }}
-        VULNHUNT_GITHUB_REPORTS_TOKEN: ${{ inputs.reports-token }}
+        VULNHUNT_GITHUB_SCAN_TOKEN: ${{ (inputs.github-auth-method == 'github_app' && steps.refresh-scan-token.outputs.token) || inputs.scan-token }}
+        VULNHUNT_GITHUB_REPORTS_TOKEN: ${{ (inputs.github-auth-method == 'github_app' && steps.refresh-reports-token.outputs.token) || inputs.reports-token }}
         VULNHUNT_PUBLISH_ENABLED: ${{ inputs.publish-results }}
         VULNHUNT_PUBLISH_DESTINATION_REPO: ${{ inputs.reports-repository-url || format('{0}/{1}', github.server_url, github.repository) }}
         VULNHUNT_PUBLISH_BRANCH: ${{ inputs.reports-branch }}

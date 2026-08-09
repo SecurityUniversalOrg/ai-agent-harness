@@ -17,15 +17,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
+ACTIONS = ROOT / ".github" / "actions"
 
 
 def _workflow(name: str) -> str:
     return (WORKFLOWS / name).read_text(encoding="utf-8")
 
 
+def _action(name: str) -> str:
+    return (ACTIONS / name / "action.yml").read_text(encoding="utf-8")
+
+
 FIX = "vulnhunter-agent-fix.yaml"
 VERIFY = "vulnhunter-agent-verify.yaml"
 SCAN = "org-ai-security-discovery.yaml"
+SEC_SCAN = "claude-agent-sec-scan"
 
 
 # ---- fix and verify (workflow_call reusable workflows) ----------------------
@@ -176,3 +182,88 @@ def test_scan_workflow_validates_auth_inputs_before_minting() -> None:
     assert validate_index < first_mint_index
     assert "github_auth_method=pat requires" in text
     assert "github_auth_method=github_app requires" in text
+
+
+# ---- Mythos delivery token refresh (claude-agent-sec-scan) -----------------
+#
+# GitHub App installation tokens are hard-capped at 1 hour by GitHub's API —
+# there is no way to mint a longer-lived one. The Mythos gVisor scan step can
+# run for hours, so the scan-token/reports-token minted once at job start (in
+# org-ai-security-discovery.yaml, before this composite action even starts)
+# can expire long before "Deliver Mythos results" runs. These tests lock down
+# that the composite action re-mints fresh, identically-scoped tokens
+# immediately before delivery when (and only when) github-auth-method is
+# github_app — 'pat' tokens don't expire on a fixed short window and must be
+# left untouched.
+
+
+def test_sec_scan_accepts_github_app_inputs() -> None:
+    text = _action(SEC_SCAN)
+    assert "github-auth-method:" in text
+    assert "default: pat" in text
+    assert "app-id:" in text
+    assert "app-private-key:" in text
+
+
+def test_sec_scan_validates_github_app_inputs() -> None:
+    text = _action(SEC_SCAN)
+    assert "github-auth-method=github_app requires the app-id and app-private-key inputs" in text
+    assert "Unsupported github-auth-method" in text
+
+
+def test_sec_scan_refreshes_tokens_only_for_mythos_github_app_delivery() -> None:
+    text = _action(SEC_SCAN)
+    assert text.count("uses: actions/create-github-app-token@v2") == 2
+    assert "id: refresh-scan-token" in text
+    assert "id: refresh-reports-token" in text
+
+    refresh_scan_if = (
+        "inputs.model == 'claude-mythos-5' && inputs.github-auth-method == 'github_app' "
+        "&& inputs.submit-repo-issues == 'true'"
+    )
+    refresh_reports_if = (
+        "inputs.model == 'claude-mythos-5' && inputs.github-auth-method == 'github_app' "
+        "&& inputs.publish-results == 'true'"
+    )
+    assert refresh_scan_if in text
+    assert refresh_reports_if in text
+
+    # Opus never reaches "Deliver Mythos results" at all (that step, and the
+    # refresh steps, are gated on model == claude-mythos-5), so a 'pat' run
+    # and an Opus run are both unaffected by this refresh logic entirely.
+
+
+def test_sec_scan_refresh_steps_run_before_delivery_and_reuse_original_scope() -> None:
+    text = _action(SEC_SCAN)
+    scope_index = text.index("id: delivery-app-scope")
+    refresh_scan_index = text.index("id: refresh-scan-token")
+    refresh_reports_index = text.index("id: refresh-reports-token")
+    deliver_index = text.index('name: Deliver Mythos results')
+    assert scope_index < refresh_scan_index < deliver_index
+    assert scope_index < refresh_reports_index < deliver_index
+    # Scoped from the same repository-url / reports-repository-url inputs the
+    # original (now possibly stale) tokens were scoped from — never wider.
+    assert "owner: ${{ steps.delivery-app-scope.outputs.target-owner }}" in text
+    assert "repositories: ${{ steps.delivery-app-scope.outputs.target-repo }}" in text
+    assert "owner: ${{ steps.delivery-app-scope.outputs.reports-owner }}" in text
+    assert "repositories: ${{ steps.delivery-app-scope.outputs.reports-repo }}" in text
+
+
+def test_sec_scan_deliver_step_prefers_refreshed_token_over_stale_input() -> None:
+    text = _action(SEC_SCAN)
+    assert (
+        "VULNHUNT_GITHUB_SCAN_TOKEN: ${{ (inputs.github-auth-method == 'github_app' "
+        "&& steps.refresh-scan-token.outputs.token) || inputs.scan-token }}" in text
+    )
+    assert (
+        "VULNHUNT_GITHUB_REPORTS_TOKEN: ${{ (inputs.github-auth-method == 'github_app' "
+        "&& steps.refresh-reports-token.outputs.token) || inputs.reports-token }}" in text
+    )
+
+
+def test_scan_workflow_passes_app_credentials_to_mythos_branch_only() -> None:
+    text = _workflow(SCAN)
+    mythos_step = text[text.index("Run isolated Mythos security scan") :]
+    assert "github-auth-method: ${{ env.RESOLVED_AUTH_METHOD }}" in mythos_step
+    assert "app-id: ${{ secrets.VULNHUNT_GITHUB_APP_ID }}" in mythos_step
+    assert "app-private-key: ${{ secrets.VULNHUNT_GITHUB_APP_PRIVATE_KEY }}" in mythos_step
