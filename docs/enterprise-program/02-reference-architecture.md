@@ -99,33 +99,50 @@ at the same model as the scan that produced the finding. This program adds a
 
 ```mermaid
 flowchart TB
-    finding["Confirmed finding\n(from scan or external intake)"] --> classify{"Severity /\ncomplexity class"}
-    classify -->|routine, low/medium severity| lowcost["Remediation tier:\nlow-cost model\n(e.g. Sonnet)"]
-    classify -->|critical severity, or\nprior repair attempts exhausted| highcost["Remediation tier:\nscan-tier model\n(Opus / Mythos)"]
-    lowcost --> attempt["Attempt fix\n(RED-to-GREEN, existing skill)"]
-    attempt -->|max_repair_attempts exceeded| highcost
-    highcost --> attempt2["Attempt fix at escalated tier"]
+    finding["Report to remediate"] --> heuristic["fix.py: read report severity\n(_detect_max_report_severity)"]
+    heuristic -->|below escalation threshold\nimplemented, pre-session| lowcost["Remediation tier:\nlow-cost model\n(remediation_model)"]
+    heuristic -->|High+, or undetectable\nimplemented, pre-session| highcost["Remediation tier:\nscan-tier model"]
+    lowcost --> attempt["Fix session\n(RED-to-GREEN, existing skill)"]
+    highcost --> attempt2["Fix session at escalated tier"]
+    attempt -->|NEEDS_MANUAL_REVIEW\nrecommended: workflow re-dispatch,\nnot yet automatic| highcost
     attempt --> gates["7-gate delivery validation\n(existing, unchanged)"]
     attempt2 --> gates
 ```
 
 - **Default**: low-cost model performs remediation for low/medium-severity
   findings.
-- **Escalation trigger 1**: finding severity is Critical/High — routes directly to
-  the scan-tier model.
-- **Escalation trigger 2**: the existing `fix.max_repair_attempts` bound
-  ([`agent/config.py`](../../vulnhunter-agent/agent/config.py)) is exhausted at
-  the low-cost tier — rather than failing the run, one final attempt is made at
-  the scan-tier model before surfacing a human-escalation checkpoint.
+- **Escalation trigger 1**: report severity is `High+` (the report's own
+  vocabulary's most severe tier — see
+  [`phase4_report.md`](../../vulnhunt/phases/phase4_report.md)) — routes to the
+  scan-tier model.
+- **Escalation trigger 2 (recommended, not yet automatic)**: the existing
+  `fix.max_repair_attempts` bound ([`agent/config.py`](../../vulnhunter-agent/agent/config.py))
+  is exhausted at the low-cost tier, producing a `NEEDS_MANUAL_REVIEW` terminal
+  finding outcome ([current-state](../architecture/automated-fix-mode.md#8-terminal-finding-outcomes)).
+  Automatically re-running the *entire* fix session at the escalated tier
+  before accepting that outcome was deliberately **not** built into `fix.py` in
+  this pass — `run_fix()` is a single-shot, bounded orchestration today, and an
+  in-process retry risks double-posting delivery artifacts unless designed with
+  the same care as the rest of the delivery-gate discipline. The safer, already-
+  buildable version of this trigger is a workflow-level re-dispatch (inspect
+  the disposition for `NEEDS_MANUAL_REVIEW` findings, re-run with an explicit
+  escalated `model`), not a Python-level loop.
 - The existing 7-gate delivery validation is model-agnostic and requires no
   change — it validates the *output* regardless of which model tier produced it.
 
-**Implementation delta**: `AnthropicConfig` needs a second model field (e.g.
-`remediation_model`, `remediation_auth_mode`/region if it should be able to point
-at a different Bedrock deployment), and `fix_runner.py`'s `run_fix_session` needs
-to select between `config.anthropic.model` and `config.anthropic.remediation_model`
-based on the severity/attempt-count rule above, rather than always taking
-`model_override` from the single `model` CLI input.
+**Implemented** (see [`agent/config.py`](../../vulnhunter-agent/agent/config.py)'s
+`AnthropicConfig.remediation_model`/`remediation_escalate_severities`,
+[`agent/fix.py`](../../vulnhunter-agent/agent/fix.py)'s `select_fix_model()` and
+`_detect_max_report_severity()`): trigger 1 runs *before* the SDK session starts,
+not mid-session — `fix.py` reads the staged report's own summary-table severity
+column (a documented regex heuristic, not a full parser; an undetectable
+severity fails toward the *more* capable model, never toward the cheaper one)
+and picks `remediation_model` or `model` accordingly, whenever the caller
+leaves `model_override` unset. The workflow/action layer exposes this as
+`model: auto` (`.github/workflows/vulnhunter-agent-fix.yaml`,
+`.github/actions/run-vulnhunter-fix/action.yml`) — any other explicit `model`
+value still always wins over automatic tiering, unchanged from before this
+existed.
 
 ### 2.3.3 Cost visibility
 
@@ -193,28 +210,52 @@ sequenceDiagram
     participant Scan as Scan workflow
     participant Issue as GitHub finding issue
     participant Dev as Developer
-    participant Replay as Replay workflow (new)
+    participant Replay as Replay workflow (implemented)
     participant Fix as Fix workflow
 
     Scan->>Issue: create issue + link poc/ and exploit_tests/ artifacts
-    Dev->>Issue: open finding, click "Replay this finding"
-    Dev->>Replay: workflow_dispatch(finding_id, ref=current branch)
-    Replay->>Replay: checkout, run exploit_tests/test_vuln_NNN.* in sandbox
+    Dev->>Issue: comment "/replay" on the finding issue
+    Issue->>Replay: issue_comment event triggers the workflow
+    Replay->>Replay: parse + validate finding-id and report path\nfrom the issue's own markers (never trust host/owner from the body)
+    Replay->>Replay: checkout exploit_tests/ file + target repo, run it
     Replay->>Issue: post result as comment (reproduced / not reproduced)
     Note over Dev,Issue: Developer now trusts the finding is real,\nor has concrete evidence to challenge it
     Fix->>Fix: after fix PR merges, same test becomes\na permanent regression test (see §4)
 ```
 
-- **"Replay this finding"** is a small new `workflow_dispatch`-triggered GitHub
-  Actions workflow, following the same trusted-control-plane pattern as the
-  existing three workflows: it checks out the target repository, stages the
-  specific `exploit_tests/` file for the requested finding ID from the published
-  report, executes it in the repository's onboarded sandbox (the same container
-  established during Dockerfile onboarding, §3), and posts the pass/fail result as
-  an issue comment.
-- This requires **no model inference at all** — it replays a test the model
-  already wrote during scanning. That keeps replay cheap and fast enough for a
-  developer to trigger casually while reviewing a finding.
+**Implemented**: [`config/onboarding/replay-finding.yml.template`](../../config/onboarding/replay-finding.yml.template).
+A few details the diagram above simplifies:
+
+- **It's an `issue_comment` trigger, not `workflow_dispatch`.** GitHub has no
+  native "button on an issue" mechanism; a `/replay` slash command is the
+  closest native equivalent, and it's genuinely one click/keystroke for the
+  developer. This also means the workflow file must live **in each target
+  repository** (issue events only fire for the repo the workflow lives in) —
+  it's a deployable template like the Wave 1 onboarding templates, not a
+  centrally-dispatched workflow like scan/fix/verify.
+- **The issue body is untrusted input, treated accordingly.** It's developer-
+  editable, and the report link it contains is a plain URL an editor could
+  alter. The workflow parses that URL for *path* information only
+  (finding ID, results directory) — the *host and repository* it clones from
+  is always the operator-configured `VULNHUNT_REPORTS_REPOSITORY_SLUG`
+  repository variable, never whatever the issue body claims. A URL pointing
+  anywhere else is rejected outright (a documented, tested rejection path —
+  this is exactly the confused-deputy shape `verify`'s existing
+  `allowed_clone_hosts`/`token_path_prefixes` guards defend against
+  ([current-state contracts](../architecture/README.md#10-data-and-integration-contracts)),
+  applied to a new entry point).
+- **Authorization**: only commenters with `OWNER`/`MEMBER`/`COLLABORATOR`
+  association can trigger it — this executes repository code, so the same
+  trust bar as who can push, not "anyone who can see the issue."
+- **No model inference**, confirmed by the implementation, not just the
+  design intent — it locates and executes a file, nothing more.
+- **Sandboxing today is "an ephemeral GitHub-hosted runner," not yet
+  "the repository's Wave-2 container."** Wave 2 (Dockerfile onboarding) isn't
+  built in this pass — wiring replay execution into a repository's actual
+  container is a documented follow-up, not a current gap in the workflow's own
+  logic. Language dispatch (Python via pytest, JS via `node`, `sh`, Go, Ruby,
+  PHP) is best-effort; an exploit test in any other language is surfaced with
+  instructions to run it manually rather than silently skipped.
 - Replay only becomes available once a repository has an onboarded, sandboxable
   test execution environment (§3/§4) — for repositories still in early onboarding
   waves, the issue instead links the PoC markdown for manual review, same as

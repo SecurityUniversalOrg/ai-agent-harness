@@ -380,3 +380,135 @@ async def test_run_fix_target_checkout_override_rejects_non_git_directory(
         target_checkout_override=not_a_checkout,
     )
     assert rc == fix._EXIT_BAD_ARGS
+
+
+# --- Enterprise-program model tiering (§2.3.2) ---------------------------
+
+
+def _write_report(tmp_path: Path, severity_row: str | None) -> Path:
+    report = tmp_path / "report"
+    report.mkdir()
+    body = "# Report\n\n### Summary\n\n| ID | Title | CWE | Severity | Exploit Test | Status |\n|---|---|---|---|---|---|\n"
+    if severity_row:
+        body += f"| VULN-001 | Example | CWE-89 | {severity_row} | PASS | Confirmed |\n"
+    (report / "README.md").write_text(body, encoding="utf-8")
+    return report
+
+
+@pytest.mark.parametrize(
+    ("severity_row", "expected"),
+    [
+        ("High+", "High+"),
+        ("High", "High"),
+        ("Medium", "Medium"),
+        ("Low", "Low"),
+        ("Informational", "Informational"),
+        (None, None),
+    ],
+)
+def test_detect_max_report_severity(
+    tmp_path: Path, severity_row: str | None, expected: str | None
+) -> None:
+    report = _write_report(tmp_path, severity_row)
+    assert fix._detect_max_report_severity(report) == expected
+
+
+def test_detect_max_report_severity_picks_most_severe_of_several(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "README.md").write_text(
+        "| ID | Title | CWE | Severity | Exploit Test | Status |\n"
+        "|---|---|---|---|---|---|\n"
+        "| VULN-001 | A | CWE-89 | Low | PASS | Confirmed |\n"
+        "| VULN-002 | B | CWE-79 | High | PASS | Confirmed |\n"
+        "| VULN-003 | C | CWE-22 | Medium | PASS | Confirmed |\n",
+        encoding="utf-8",
+    )
+    assert fix._detect_max_report_severity(report) == "High"
+
+
+def test_detect_max_report_severity_ignores_non_table_prose(tmp_path: Path) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    (report / "README.md").write_text(
+        "This report discusses High severity findings in general terms, "
+        "but the actual table below has none.\n\n"
+        "| ID | Title | CWE | Severity | Exploit Test | Status |\n"
+        "|---|---|---|---|---|---|\n"
+        "| VULN-001 | A | CWE-89 | Low | PASS | Confirmed |\n",
+        encoding="utf-8",
+    )
+    assert fix._detect_max_report_severity(report) == "Low"
+
+
+def test_detect_max_report_severity_missing_readme_returns_none(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "report"
+    report.mkdir()
+    assert fix._detect_max_report_severity(report) is None
+
+
+def test_select_fix_model_disabled_by_default(populated_agent_config) -> None:
+    config = dataclasses.replace(
+        populated_agent_config,
+        anthropic=dataclasses.replace(
+            populated_agent_config.anthropic,
+            model="claude-opus-4-8",
+            remediation_model="",
+        ),
+    )
+    assert fix.select_fix_model(config, "Low") == "claude-opus-4-8"
+    assert fix.select_fix_model(config, None) == "claude-opus-4-8"
+
+
+def test_select_fix_model_uses_remediation_tier_below_threshold(
+    populated_agent_config,
+) -> None:
+    config = dataclasses.replace(
+        populated_agent_config,
+        anthropic=dataclasses.replace(
+            populated_agent_config.anthropic,
+            model="claude-opus-4-8",
+            remediation_model="claude-sonnet-5",
+            remediation_escalate_severities=("High+",),
+        ),
+    )
+    for severity in ("High", "Medium", "Low", "Informational"):
+        assert fix.select_fix_model(config, severity) == "claude-sonnet-5"
+
+
+def test_select_fix_model_escalates_configured_severities(
+    populated_agent_config,
+) -> None:
+    config = dataclasses.replace(
+        populated_agent_config,
+        anthropic=dataclasses.replace(
+            populated_agent_config.anthropic,
+            model="claude-opus-4-8",
+            remediation_model="claude-sonnet-5",
+            remediation_escalate_severities=("High+", "High"),
+        ),
+    )
+    assert fix.select_fix_model(config, "High+") == "claude-opus-4-8"
+    assert fix.select_fix_model(config, "High") == "claude-opus-4-8"
+    assert fix.select_fix_model(config, "Medium") == "claude-sonnet-5"
+
+
+def test_select_fix_model_fails_toward_capable_model_on_unknown_severity(
+    populated_agent_config,
+) -> None:
+    """An undetectable severity escalates rather than silently using the
+    cheap tier — cost-safety is not allowed to trade away fix quality when
+    the heuristic can't read the report."""
+    config = dataclasses.replace(
+        populated_agent_config,
+        anthropic=dataclasses.replace(
+            populated_agent_config.anthropic,
+            model="claude-opus-4-8",
+            remediation_model="claude-sonnet-5",
+        ),
+    )
+    assert fix.select_fix_model(config, None) == "claude-opus-4-8"

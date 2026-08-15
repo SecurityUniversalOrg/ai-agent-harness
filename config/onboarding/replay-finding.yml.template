@@ -1,0 +1,285 @@
+name: Replay VulnHunter Finding
+
+# Enterprise Program reference architecture §2.5:
+# docs/enterprise-program/02-reference-architecture.md#25-developer-finding-replay-mechanism
+#
+# Lets a developer comment `/replay` on a VulnHunter finding issue to
+# re-run the exact exploit test the scanning agent used, against the
+# current branch, with the result posted back as a comment. No model
+# inference — it replays a test the agent already wrote.
+#
+# This file must live in the TARGET repository (each repo VulnHunter scans),
+# not the central VulnHunter workflow repository — `issue_comment` only
+# fires for issues in the repo the workflow file lives in. Deployed by the
+# onboarding pipeline once a repository has a working sandbox to execute
+# tests in (see rollout plan Wave 3); until then this workflow is inert and
+# harmless to have present early.
+#
+# Required repository configuration before this does anything useful:
+#   - Variable  VULNHUNT_REPORTS_REPOSITORY_SLUG   e.g. "YourOrg/vulnhunter-reports"
+#   - Secret    VULNHUNT_GITHUB_REPORTS_TOKEN       read-only on that reports repo
+# (Same reports repository/token role documented in
+#  .github/workflows/README.md in the central VulnHunter workflow repo.)
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: vulnhunter-replay-${{ github.event.issue.number }}-${{ github.event.comment.id }}
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    # Coarse filter: only real issues (not PR review comments), only
+    # comments that actually invoke the command.
+    if: github.event.issue.pull_request == null && startsWith(github.event.comment.body, '/replay')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      REPORTS_OWNER_REPO: ${{ vars.VULNHUNT_REPORTS_REPOSITORY_SLUG }}
+      REPORTS_TOKEN: ${{ secrets.VULNHUNT_GITHUB_REPORTS_TOKEN }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      COMMENT_AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      # Anyone who can comment on a public (or org-visible) issue can try
+      # to trigger this job — it executes repository code, so require at
+      # least collaborator-level trust before doing anything else.
+      - name: Authorize commenter
+        id: authz
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${COMMENT_AUTHOR_ASSOCIATION}" in
+            OWNER|MEMBER|COLLABORATOR) echo "authorized=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::warning::Ignoring /replay from non-collaborator (${COMMENT_AUTHOR_ASSOCIATION})."
+              echo "authorized=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Acknowledge
+        if: steps.authz.outputs.authorized == 'true'
+        run: |
+          gh api "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content='eyes' >/dev/null || true
+
+      - name: Reject unauthorized commenter
+        if: steps.authz.outputs.authorized != 'true'
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --repo "${{ github.repository }}" \
+            --body "Only repository collaborators can trigger \`/replay\`."
+
+      # The issue body is developer-editable content. The only thing this
+      # step trusts it for is which finding ID and which path *inside the
+      # already-configured reports repository* to fetch — never which host
+      # or repository to clone from. An edited/forged report URL pointing
+      # anywhere else is rejected outright, not silently followed.
+      - name: Extract and validate replay target
+        id: target
+        if: steps.authz.outputs.authorized == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          [[ -n "${REPORTS_OWNER_REPO}" ]] || {
+            echo "::error::Repository variable VULNHUNT_REPORTS_REPOSITORY_SLUG is not set; refusing to guess a reports source from issue content."
+            gh issue comment "${ISSUE_NUMBER}" --repo "${{ github.repository }}" \
+              --body "Replay is not configured on this repository yet (missing the \`VULNHUNT_REPORTS_REPOSITORY_SLUG\` variable)."
+            exit 1
+          }
+
+          body="$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}" --jq .body)"
+
+          finding_id="$(grep -oE '<!--[[:space:]]*vulnhunt-finding-id:[[:space:]]*VULN-[0-9]+[[:space:]]*-->' <<<"${body}" \
+            | grep -oE 'VULN-[0-9]+' | head -n1 || true)"
+          if [[ -z "${finding_id}" ]]; then
+            echo "::error::No vulnhunt-finding-id marker on issue #${ISSUE_NUMBER}."
+            gh issue comment "${ISSUE_NUMBER}" --repo "${{ github.repository }}" \
+              --body "This doesn't look like a VulnHunter finding issue (no finding-id marker found) — nothing to replay."
+            exit 1
+          fi
+
+          report_url="$(grep -oE 'Full report:[[:space:]]*\S+' <<<"${body}" | sed -E 's/^Full report:[[:space:]]*//' | head -n1 || true)"
+          if [[ -z "${report_url}" ]]; then
+            echo "::error::No 'Full report:' line on issue #${ISSUE_NUMBER}."
+            gh issue comment "${ISSUE_NUMBER}" --repo "${{ github.repository }}" \
+              --body "Could not find the published-report link on this issue — nothing to replay."
+            exit 1
+          fi
+
+          python3 - "$report_url" "$REPORTS_OWNER_REPO" "$finding_id" <<'PY'
+          import os
+          import re
+          import sys
+          from urllib.parse import urlparse
+
+          report_url, expected_owner_repo, finding_id = sys.argv[1:4]
+          parsed = urlparse(report_url)
+          if parsed.scheme != "https":
+              sys.exit(f"report URL is not https: {report_url!r}")
+
+          path = parsed.path.lstrip("/")
+          m = re.match(
+              r"^(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<ref>[^/]+)/(?P<rest>.+)/README\.md$",
+              path,
+          )
+          if not m:
+              sys.exit("report URL does not match the expected .../blob/<ref>/<path>/README.md shape")
+
+          owner_repo = f"{m['owner']}/{m['repo']}"
+          if owner_repo.lower() != expected_owner_repo.lower():
+              sys.exit(
+                  f"report URL points at {owner_repo!r}, not the configured reports "
+                  f"repository {expected_owner_repo!r} -- refusing to clone an "
+                  "unexpected source found in issue content"
+              )
+
+          rest = m["rest"]
+          if rest.startswith("/") or ".." in rest.split("/") or "@{" in rest:
+              sys.exit("results path in report URL is not safe")
+          if not re.search(r"_VULNHUNT_RESULTS_[^/]+$", rest):
+              sys.exit("results path in report URL does not end in a *_VULNHUNT_RESULTS_* directory")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"reports-ref={m['ref']}\n")
+              fh.write(f"results-path={rest}\n")
+              fh.write(f"finding-id={finding_id}\n")
+          PY
+
+      - name: Report invalid replay target
+        if: steps.authz.outputs.authorized == 'true' && failure()
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" --repo "${{ github.repository }}" \
+            --body "Could not safely determine what to replay from this issue -- see the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details." || true
+
+      - name: Checkout exploit test from the reports repository
+        if: steps.target.outputs.results-path != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPORTS_OWNER_REPO }}
+          ref: ${{ steps.target.outputs.reports-ref }}
+          token: ${{ env.REPORTS_TOKEN }}
+          persist-credentials: false
+          path: .vulnhunter-replay/report
+          sparse-checkout: |
+            ${{ steps.target.outputs.results-path }}/exploit_tests
+          sparse-checkout-cone-mode: false
+
+      - name: Checkout target repository
+        if: steps.target.outputs.results-path != ''
+        uses: actions/checkout@v4
+        with:
+          path: .vulnhunter-replay/target
+          persist-credentials: false
+
+      - name: Run exploit test
+        id: run
+        if: steps.target.outputs.results-path != ''
+        shell: bash
+        env:
+          RESULTS_PATH: ${{ steps.target.outputs.results-path }}
+          FINDING_ID: ${{ steps.target.outputs.finding-id }}
+        run: |
+          set -uo pipefail  # deliberately not -e: a failing exploit test is an expected, informative outcome
+
+          num="${FINDING_ID#VULN-}"
+          num_nozero="$(sed 's/^0*//' <<<"${num}")"
+          test_dir=".vulnhunter-replay/report/${RESULTS_PATH}/exploit_tests"
+
+          test_file=""
+          if [[ -d "${test_dir}" ]]; then
+            test_file="$(find "${test_dir}" -maxdepth 1 -type f \( \
+              -iname "test_vuln_$(printf '%03d' "${num_nozero}")*" -o \
+              -iname "test_vuln_${num_nozero}_*" \
+            \) -print -quit)"
+          fi
+
+          if [[ -z "${test_file}" ]]; then
+            {
+              echo "outcome=no-test-found"
+              echo "log=No exploit_tests/ file found for ${FINDING_ID} in the published report."
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          staged="$(basename "${test_file}")"
+          cp "${test_file}" ".vulnhunter-replay/target/${staged}"
+          ext="${staged##*.}"
+
+          log_file="$(mktemp)"
+          (
+            cd .vulnhunter-replay/target
+            case "${ext}" in
+              py)  python3 -m pytest "./${staged}" -v ;;
+              js)  node "./${staged}" ;;
+              sh)  bash "./${staged}" ;;
+              go)  go run "./${staged}" ;;
+              rb)  ruby "./${staged}" ;;
+              php) php "./${staged}" ;;
+              *)   exit 97 ;;  # signals "unsupported" to the parent shell below
+            esac
+          ) > "${log_file}" 2>&1
+          rc=$?
+
+          if [[ "${rc}" -eq 97 ]]; then
+            {
+              echo "outcome=unsupported-language"
+              echo "log=${staged} has extension .${ext}, which this workflow doesn't run automatically yet. Download it from the published report and run it manually."
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          {
+            echo "outcome=$([[ ${rc} -eq 0 ]] && echo reproduced || echo not-reproduced)"
+            echo "log<<VULNHUNTER_REPLAY_EOF"
+            tail -c 4000 "${log_file}"
+            echo "VULNHUNTER_REPLAY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post replay result
+        if: steps.target.outputs.results-path != ''
+        env:
+          OUTCOME: ${{ steps.run.outputs.outcome }}
+          RUN_LOG: ${{ steps.run.outputs.log }}
+          FINDING_ID: ${{ steps.target.outputs.finding-id }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+        run: |
+          set -euo pipefail
+          case "${OUTCOME}" in
+            reproduced)
+              summary="🔴 **Reproduced** — this finding still reproduces on \`${{ github.sha }}\`. The exploit test the scanning agent used still demonstrates the vulnerability."
+              ;;
+            not-reproduced)
+              summary="🟢 **Did not reproduce** — the exploit test did not demonstrate the vulnerability on \`${{ github.sha }}\`. This is a signal, not proof of a fix on its own — compare against a real VulnHunter verify run."
+              ;;
+            no-test-found)
+              summary="⚠️ No exploit test file was found for \`${FINDING_ID}\` in the published report."
+              ;;
+            unsupported-language)
+              summary="⚠️ This finding's exploit test is in a language this workflow can't run automatically yet."
+              ;;
+            *)
+              summary="⚠️ Replay did not complete normally."
+              ;;
+          esac
+          {
+            echo "${summary}"
+            echo
+            echo "<details><summary>Output</summary>"
+            echo
+            echo '```'
+            echo "${RUN_LOG}"
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            echo "_Replayed by @${COMMENTER} via \`/replay\`, run [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})._"
+          } > /tmp/replay-comment-body.md
+          gh issue comment "${ISSUE_NUMBER}" --repo "${{ github.repository }}" --body-file /tmp/replay-comment-body.md

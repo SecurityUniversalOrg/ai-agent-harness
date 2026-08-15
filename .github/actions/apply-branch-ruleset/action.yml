@@ -1,0 +1,128 @@
+name: Apply Branch Ruleset
+description: >
+  Idempotently creates or updates a named GitHub Ruleset on a repository's
+  default branch, without touching any pre-existing, differently-named
+  branch protection. See config/onboarding/README.md for the rationale
+  behind the shipped ruleset template.
+
+inputs:
+  owner:
+    description: Repository owner (org or user login).
+    required: true
+  repo:
+    description: Repository name.
+    required: true
+  token:
+    description: >
+      GitHub token with Administration: write on the target repository
+      (fine-grained PAT/App) or classic repo-scope admin rights — Rulesets
+      are a repository-administration operation, a materially higher
+      privilege than the Contents/Issues scope every other role in this
+      program needs. Never reuse a scan/fix/verify/reports token for this.
+    required: true
+  ruleset-template-path:
+    description: Path to the ruleset JSON body (see config/onboarding/ruleset-template.json).
+    required: false
+    default: config/onboarding/ruleset-template.json
+  ruleset-name:
+    description: Must match the "name" field inside the template — used to find a previously-applied ruleset idempotently.
+    required: false
+    default: vulnhunter-program-baseline
+  mode:
+    description: "'create-if-missing' (default; never touches an already-applied ruleset) or 'update' (reapplies the current template to a ruleset this workflow previously created)."
+    required: false
+    default: create-if-missing
+  github-host:
+    description: GitHub hostname for the REST API (github.com or a GHE hostname).
+    required: false
+    default: github.com
+
+outputs:
+  action-taken:
+    description: One of "created", "updated", "skipped-exists", "skipped-not-found".
+    value: ${{ steps.apply.outputs.action-taken }}
+  ruleset-id:
+    description: The applied ruleset's numeric ID, when created or updated.
+    value: ${{ steps.apply.outputs.ruleset-id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Apply ruleset
+      id: apply
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GH_HOST: ${{ inputs.github-host }}
+        OWNER: ${{ inputs.owner }}
+        REPO: ${{ inputs.repo }}
+        TEMPLATE_PATH: ${{ inputs.ruleset-template-path }}
+        RULESET_NAME: ${{ inputs.ruleset-name }}
+        MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+
+        [[ -n "${GH_TOKEN}" ]] || { echo "::error::token must not be empty."; exit 64; }
+        echo "::add-mask::${GH_TOKEN}"
+        [[ "${OWNER}" =~ ^[A-Za-z0-9_.-]+$ && "${REPO}" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+          echo "::error::owner/repo contain unsupported characters."
+          exit 64
+        }
+        case "${MODE}" in
+          create-if-missing|update) ;;
+          *) echo "::error::mode must be 'create-if-missing' or 'update'."; exit 64 ;;
+        esac
+        [[ -f "${TEMPLATE_PATH}" ]] || {
+          echo "::error::ruleset-template-path not found: ${TEMPLATE_PATH}"
+          exit 64
+        }
+        template_name="$(jq -r '.name' "${TEMPLATE_PATH}")"
+        [[ "${template_name}" == "${RULESET_NAME}" ]] || {
+          echo "::error::ruleset-template's \"name\" (${template_name}) does not match ruleset-name (${RULESET_NAME})."
+          exit 64
+        }
+
+        existing_id="$(
+          gh api "/repos/${OWNER}/${REPO}/rulesets" --paginate \
+            --jq ".[] | select(.name == \"${RULESET_NAME}\") | .id" \
+            2>/dev/null | head -n1 || true
+        )"
+
+        if [[ -z "${existing_id}" ]]; then
+          if [[ "${MODE}" == "update" ]]; then
+            echo "::warning::mode=update but no existing '${RULESET_NAME}' ruleset was found on ${OWNER}/${REPO}; nothing to update."
+            {
+              echo "action-taken=skipped-not-found"
+              echo "ruleset-id="
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          created="$(gh api "/repos/${OWNER}/${REPO}/rulesets" \
+            --method POST \
+            --input "${TEMPLATE_PATH}")"
+          new_id="$(jq -r '.id' <<<"${created}")"
+          echo "Created ruleset '${RULESET_NAME}' (id=${new_id}) on ${OWNER}/${REPO}."
+          {
+            echo "action-taken=created"
+            echo "ruleset-id=${new_id}"
+          } >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+
+        if [[ "${MODE}" == "create-if-missing" ]]; then
+          echo "Ruleset '${RULESET_NAME}' (id=${existing_id}) already exists on ${OWNER}/${REPO}; leaving it unchanged (mode=create-if-missing)."
+          {
+            echo "action-taken=skipped-exists"
+            echo "ruleset-id=${existing_id}"
+          } >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+
+        gh api "/repos/${OWNER}/${REPO}/rulesets/${existing_id}" \
+          --method PUT \
+          --input "${TEMPLATE_PATH}" >/dev/null
+        echo "Updated ruleset '${RULESET_NAME}' (id=${existing_id}) on ${OWNER}/${REPO}."
+        {
+          echo "action-taken=updated"
+          echo "ruleset-id=${existing_id}"
+        } >> "${GITHUB_OUTPUT}"

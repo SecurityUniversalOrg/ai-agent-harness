@@ -1,0 +1,20 @@
+<!--
+Seeded by the VulnHunter Enterprise Program onboarding pipeline
+(docs/enterprise-program/03-rollout-plan.md, Wave 1). Edit freely.
+-->
+
+## What does this change do?
+
+
+
+## How was it tested?
+
+
+
+## Security-relevant?
+
+- [ ] This PR touches authentication, authorization, input handling, or
+      another security-sensitive area (see
+      [unit test coverage architecture §4.6](https://github.com/SecurityUniversalOrg/ai-agent-harness/blob/main/docs/enterprise-program/04-unit-test-coverage-architecture.md#46-security-aware-coverage)
+      for the category list). If checked, confirm the relevant tests were
+      run/updated.

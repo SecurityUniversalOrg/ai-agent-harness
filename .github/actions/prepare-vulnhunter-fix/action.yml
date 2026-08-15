@@ -128,7 +128,7 @@ runs:
           exit 1
         }
         case "${MODEL}" in
-          claude-opus-4-7|claude-opus-4-8|claude-mythos-5) ;;
+          claude-opus-4-7|claude-opus-4-8|claude-mythos-5|auto) ;;
           *) echo "::error::Unsupported fix model: ${MODEL}"; exit 1 ;;
         esac
         case "${ANTHROPIC_AUTH_MODE}" in

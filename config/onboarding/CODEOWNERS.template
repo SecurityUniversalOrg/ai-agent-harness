@@ -1,0 +1,10 @@
+# Seeded by the VulnHunter Enterprise Program onboarding pipeline
+# (docs/enterprise-program/03-rollout-plan.md, Wave 1).
+#
+# This is a starting point, not a finished policy: replace the placeholder
+# below with your team's actual GitHub handle or team slug, then add
+# path-specific owners as your repository's structure warrants.
+#
+# See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+*   @REPLACE_WITH_OWNING_TEAM

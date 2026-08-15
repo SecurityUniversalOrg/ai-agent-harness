@@ -72,6 +72,20 @@ class AnthropicConfig:
     # config/credentials file. Blank → the CLI uses the default credential
     # chain (AWS_* env vars, default profile, SSO, container/instance role).
     aws_profile: str = ""
+    # Enterprise-program model tiering (fix mode only; see
+    # docs/enterprise-program/02-reference-architecture.md §2.3.2).
+    # remediation_model: cheaper model fix mode uses by default instead of
+    # `model`. Blank (the default) disables tiering entirely — fix mode uses
+    # `model` for every run, exactly as before this field existed.
+    remediation_model: str = ""
+    # Severity tokens (matched against the report's own "High+/High/Medium/
+    # Low/Informational" vocabulary — see vulnhunt/phases/phase4_report.md's
+    # summary-table format) that route a fix run to `model` instead of
+    # `remediation_model` even when remediation_model is configured. Case-
+    # sensitive; comma-separated in the env-var form. Default: only the most
+    # severe tier escalates — widen this (e.g. add "High") if remediation_model
+    # should be reserved for Medium/Low/Informational only.
+    remediation_escalate_severities: tuple[str, ...] = ("High+",)
 
 
 @dataclass(frozen=True)
@@ -536,6 +550,20 @@ def load_config(path: str | os.PathLike[str] | None = None) -> AgentConfig:
         aws_profile=str(
             _resolve(anthropic_raw, "anthropic", "aws_profile", default="")
         ).strip(),
+        remediation_model=str(
+            _resolve(anthropic_raw, "anthropic", "remediation_model", default="")
+        ).strip(),
+        remediation_escalate_severities=tuple(
+            str(value).strip()
+            for value in _resolve(
+                anthropic_raw,
+                "anthropic",
+                "remediation_escalate_severities",
+                kind=list,
+                default=["High+"],
+            )
+            if str(value).strip()
+        ),
     )
     if auth_mode == "anthropic_aws" and (
         not anthropic.aws_workspace_id

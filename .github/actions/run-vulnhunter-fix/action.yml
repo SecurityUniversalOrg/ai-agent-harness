@@ -13,8 +13,17 @@ inputs:
   scratch-base:
     required: true
   model:
+    description: "Model, or 'auto' to let config-driven remediation-tier selection choose per run (see remediation-model). Not 'auto'-compatible with claude-mythos-5, which always requires an explicit, retention-acknowledged choice."
     required: false
     default: claude-opus-4-8
+  remediation-model:
+    description: Cheaper model used when model=auto and report severity doesn't require escalation. Blank disables tiering even when model=auto (falls back to config.toml's anthropic.model).
+    required: false
+    default: ""
+  remediation-escalate-severities:
+    description: Comma-separated report severity tokens ("High+","High","Medium","Low","Informational") that force the escalated (scan-tier) model even when model=auto.
+    required: false
+    default: "High+"
   mythos-retention-acknowledged:
     required: false
     default: "false"
@@ -114,6 +123,11 @@ runs:
         VULNHUNT_FIX_ALLOWED_DOMAINS: ${{ inputs.allowed-domains }}
         VULNHUNT_FIX_KEEP_WORKDIR: ${{ inputs.keep-workdir }}
         VULNHUNT_FIX_TEST_POLICY: ${{ inputs.test-policy }}
+        # Enterprise-program model tiering (docs/enterprise-program/02-reference-
+        # architecture.md §2.3.2). Only takes effect when MODEL="auto" below
+        # causes --model to be omitted; otherwise the explicit model wins.
+        VULNHUNT_ANTHROPIC_REMEDIATION_MODEL: ${{ inputs.remediation-model }}
+        VULNHUNT_ANTHROPIC_REMEDIATION_ESCALATE_SEVERITIES: ${{ inputs.remediation-escalate-severities }}
         VULNHUNT_SANDBOX_ENABLED: "true"
         VULNHUNT_SANDBOX_FAIL_IF_UNAVAILABLE: "true"
         VULNHUNT_SANDBOX_ALLOW_UNSANDBOXED_COMMANDS: "false"
@@ -133,11 +147,17 @@ runs:
         post_args=(--no-post)
         [[ "${DELIVERY_ENABLED}" == "true" ]] && post_args=()
 
+        # model="auto" omits --model entirely so config-driven tiering
+        # (VULNHUNT_ANTHROPIC_REMEDIATION_MODEL, set above) decides per run
+        # instead of every fix always running at the scan-tier model.
+        model_args=(--model "${MODEL}")
+        [[ "${MODEL}" != "auto" ]] || model_args=()
+
         set +e
         "${PYTHON_PATH}" -m agent \
           --mode=fix \
           --config "${CONFIG_PATH}" \
-          --model "${MODEL}" \
+          "${model_args[@]}" \
           --scratch-dir "${SCRATCH_BASE}" \
           --test-policy "${TEST_POLICY}" \
           "${post_args[@]}" \

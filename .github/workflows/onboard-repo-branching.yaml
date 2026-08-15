@@ -1,0 +1,143 @@
+name: Onboard Repo Branching (Wave 1)
+
+# Enterprise Program rollout plan, Wave 1:
+# docs/enterprise-program/03-rollout-plan.md §3.3
+#
+# Applies a baseline GitHub Ruleset (required PR review, no force-push, no
+# branch deletion) to every repository in repos_csv, and — only for
+# repositories missing them — opens a single onboarding PR seeding
+# CODEOWNERS, a PR template, and a CI workflow stub. Never force-pushes,
+# never overwrites an existing ruleset it didn't create, never opens a
+# second onboarding PR for a repository it already touched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos_csv:
+        description: Path to CSV containing repositories to onboard
+        required: false
+        default: config/repos.csv
+      mode:
+        description: "'create-if-missing' (default; safe to re-run indefinitely) or 'update' (reapplies the current ruleset template to repos this workflow already onboarded)"
+        required: false
+        type: choice
+        default: create-if-missing
+        options:
+          - create-if-missing
+          - update
+      seed_templates:
+        description: Also open the CODEOWNERS/PR-template/CI-stub onboarding PR for repos missing them
+        required: false
+        type: boolean
+        default: true
+      github_auth_method:
+        description: How to obtain the onboarding GitHub token
+        required: false
+        type: choice
+        default: pat
+        options:
+          - pat
+          - github_app
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-matrix:
+    name: Build repository matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build repository matrix from CSV
+        id: matrix
+        uses: ./.github/actions/build-repo-matrix
+        with:
+          repos-csv: ${{ inputs.repos_csv || 'config/repos.csv' }}
+
+  onboard-repositories:
+    name: Onboard ${{ matrix.owner }}/${{ matrix.repo }}
+    runs-on: ubuntu-latest
+    needs: build-matrix
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        include: ${{ fromJson(needs.build-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout central workflow repo
+        uses: actions/checkout@v4
+
+      - name: Validate GitHub authentication inputs
+        shell: bash
+        env:
+          AUTH_METHOD: ${{ inputs.github_auth_method }}
+          APP_ID: ${{ secrets.VULNHUNT_GITHUB_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.VULNHUNT_GITHUB_APP_PRIVATE_KEY }}
+          PAT_ONBOARDING: ${{ secrets.VULNHUNT_GITHUB_ONBOARDING_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "${AUTH_METHOD}" in
+            pat)
+              [[ -n "${PAT_ONBOARDING}" ]] || {
+                echo "::error::github_auth_method=pat requires the VULNHUNT_GITHUB_ONBOARDING_TOKEN secret (Administration:write on the onboarded repos — a materially higher privilege than the scan/fix/verify tokens; never reuse those here)."
+                exit 1
+              }
+              ;;
+            github_app)
+              [[ -n "${APP_ID}" && -n "${APP_PRIVATE_KEY}" ]] || {
+                echo "::error::github_auth_method=github_app requires the VULNHUNT_GITHUB_APP_ID and VULNHUNT_GITHUB_APP_PRIVATE_KEY secrets, and the App must be granted Administration:write for this workflow."
+                exit 1
+              }
+              ;;
+            *)
+              echo "::error::Unsupported github_auth_method '${AUTH_METHOD}'; use 'pat' or 'github_app'."
+              exit 1
+              ;;
+          esac
+
+      - name: Mint onboarding-scoped GitHub App installation token
+        id: mint-onboarding-token
+        if: inputs.github_auth_method == 'github_app'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.VULNHUNT_GITHUB_APP_ID }}
+          private-key: ${{ secrets.VULNHUNT_GITHUB_APP_PRIVATE_KEY }}
+          owner: ${{ matrix.owner }}
+          repositories: ${{ matrix.repo }}
+
+      - name: Apply baseline ruleset
+        id: ruleset
+        uses: ./.github/actions/apply-branch-ruleset
+        with:
+          owner: ${{ matrix.owner }}
+          repo: ${{ matrix.repo }}
+          token: ${{ inputs.github_auth_method == 'github_app' && steps.mint-onboarding-token.outputs.token || secrets.VULNHUNT_GITHUB_ONBOARDING_TOKEN }}
+          mode: ${{ inputs.mode || 'create-if-missing' }}
+
+      - name: Seed branching templates
+        id: seed
+        if: inputs.seed_templates != 'false'
+        uses: ./.github/actions/seed-branching-templates
+        with:
+          owner: ${{ matrix.owner }}
+          repo: ${{ matrix.repo }}
+          token: ${{ inputs.github_auth_method == 'github_app' && steps.mint-onboarding-token.outputs.token || secrets.VULNHUNT_GITHUB_ONBOARDING_TOKEN }}
+          default-branch: ${{ matrix.default_branch }}
+
+      - name: Summarize
+        if: always()
+        shell: bash
+        env:
+          RULESET_OUTCOME: ${{ steps.ruleset.outputs.action-taken }}
+          SEED_OUTCOME: ${{ steps.seed.outputs.action-taken || 'skipped' }}
+          SEED_PR_URL: ${{ steps.seed.outputs.pr-url }}
+        run: |
+          {
+            echo "### ${{ matrix.owner }}/${{ matrix.repo }}"
+            echo "- Ruleset: ${RULESET_OUTCOME}"
+            echo "- Templates: ${SEED_OUTCOME}${SEED_PR_URL:+ ($SEED_PR_URL)}"
+          } >> "${GITHUB_STEP_SUMMARY}"
