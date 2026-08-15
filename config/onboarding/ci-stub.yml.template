@@ -1,0 +1,27 @@
+name: CI (onboarding placeholder)
+
+# Seeded by the VulnHunter Enterprise Program onboarding pipeline
+# (docs/enterprise-program/03-rollout-plan.md, Wave 1) because this
+# repository had no workflow under .github/workflows/ at all.
+#
+# This workflow deliberately does nothing beyond checking out the repository
+# and confirming the job runs — it exists so there is *something* CI-shaped
+# to build on, and so later waves (Dockerfile onboarding, unit test baseline)
+# have an obvious place to add real build/test steps instead of creating a
+# second, competing workflow file.
+#
+# Replace this with your team's actual build/test/lint steps. Once this
+# workflow reports a real, passing check, add a `required_status_checks`
+# rule referencing it to config/onboarding/ruleset-template.json (see that
+# directory's README) so it becomes a merge requirement fleet-wide.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "No build/test steps defined yet — replace this job."

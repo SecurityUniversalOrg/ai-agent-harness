@@ -68,23 +68,32 @@ changes to land, so that (a) VulnHunter can safely open issues without confusion
 about which branch is authoritative, and (b) later fix-mode PRs have a real
 review gate to land against.
 
-Two onboarding mechanisms, chosen per repository based on how much the team
-already has in place:
+**Implemented**: [`.github/workflows/onboard-repo-branching.yaml`](../../.github/workflows/onboard-repo-branching.yaml),
+matrix-driven off the same [`config/repos.csv`](../../config/repos.csv) the
+scan workflow uses. Two composite actions, run per repository, each
+independently idempotent:
 
-1. **GitHub Rulesets applied centrally** — for repositories that already use a
-   reasonable default-branch model, a central onboarding workflow applies a
-   standard Ruleset (required PR review, required status checks, block force-push
-   and branch deletion) without touching repository content.
-2. **Central seeding workflow** — for repositories with no defined branching
-   strategy at all (the common case per the program's stated constraints), a
-   one-time workflow:
-   - Creates/confirms a `main` (or team-approved default) branch.
-   - Seeds standard repository templates: CODEOWNERS, PR template, a minimal
-     CI workflow stub.
-   - Applies the same standard Ruleset as above.
-   - Opens a single onboarding PR the team reviews and merges on their own
-     schedule — onboarding never force-pushes over a team's existing history or
-     workflow.
+1. [`apply-branch-ruleset`](../../.github/actions/apply-branch-ruleset/action.yml)
+   — creates or updates a single named Ruleset
+   ([`config/onboarding/ruleset-template.json`](../../config/onboarding/ruleset-template.json):
+   required PR review, block force-push, block branch deletion — deliberately
+   *no* `required_status_checks` yet; see that template's own README for why)
+   using GitHub's native `~DEFAULT_BRANCH` ref pattern, so it applies correctly
+   regardless of what each repository's default branch is actually named. It
+   never touches a pre-existing, differently-named ruleset or classic branch
+   protection — a repository that already has one is left alone.
+2. [`seed-branching-templates`](../../.github/actions/seed-branching-templates/action.yml)
+   — opens exactly one onboarding PR (never force-pushed, never duplicated on
+   re-run) adding only the CODEOWNERS/PR-template/CI-stub files a repository
+   is actually missing. A repository with all three already in place gets no
+   PR at all.
+
+This role needs **Administration: write** on every onboarded repository —
+materially more privileged than the scan/fix/verify/reports tokens — so it
+uses its own dedicated credential
+(`VULNHUNT_GITHUB_ONBOARDING_TOKEN`/App-permission grant, documented in
+[`.github/workflows/README.md`](../../.github/workflows/README.md)), never
+reused as any other role's token.
 
 Repositories that decline or delay onboarding remain on the dashboard as
 "blocked at Wave 1," visible to the program owner and the owning team's SAFe

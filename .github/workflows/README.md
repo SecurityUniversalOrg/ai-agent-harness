@@ -55,6 +55,7 @@ combination you want per workflow.
 | Scan | `VULNHUNT_GITHUB_SCAN_TOKEN`, `VULNHUNT_GITHUB_REPORTS_TOKEN` | `VULNHUNT_GITHUB_APP_ID`, `VULNHUNT_GITHUB_APP_PRIVATE_KEY` |
 | Fix | `VULNHUNT_GITHUB_FIX_TOKEN`, `VULNHUNT_GITHUB_REPORTS_TOKEN` | `VULNHUNT_GITHUB_APP_ID`, `VULNHUNT_GITHUB_APP_PRIVATE_KEY` |
 | Verify | `VULNHUNT_GITHUB_VERIFY_TOKEN`, `VULNHUNT_GITHUB_REPORTS_TOKEN` | `VULNHUNT_GITHUB_APP_ID`, `VULNHUNT_GITHUB_APP_PRIVATE_KEY` |
+| Onboard branching (enterprise program, Wave 1) | `VULNHUNT_GITHUB_ONBOARDING_TOKEN` | `VULNHUNT_GITHUB_APP_ID`, `VULNHUNT_GITHUB_APP_PRIVATE_KEY` (App must additionally be granted **Administration: Read and write**) |
 
 All three workflows additionally need Anthropic credentials — either
 `ANTHROPIC_AWS_WORKSPACE_ID` + `ANTHROPIC_AWS_API_KEY`, or
@@ -80,6 +81,13 @@ both PAT scope selection and GitHub App permissions/installation below.
 | `verify-token` | Verify | Clones the target repo (and any cross-referenced repos); reads issue/comment/timeline history via REST + GraphQL; posts verdict comments and reopens issues when enabled | `GET issues`, GraphQL `userContentEdits`, `GET comments/events`, `POST issue comments`, `PATCH issues`, clone (git) | Classic: `repo`. Fine-grained: **Contents: Read**, **Issues: Read and write**, **Metadata: Read** | **Contents: Read**, **Issues: Read and write** |
 | `fix-token` | Fix | Clones the target repo; when `delivery_enabled=true`, forks it, pushes branches, and opens PRs/issues in that private fork | Clone (git); `POST /repos/{owner}/{repo}/forks`; push (git); `POST pulls`; `POST issues` | Classic: `repo`, plus membership/repo-creation rights in the fork destination org. Fine-grained: **Contents: Read** (dry run) or **Contents: Read and write**, **Pull requests: Read and write**, **Issues: Read and write**, **Administration: Read and write** (delivery) | See [Fork delivery: a two-sided requirement](#fork-delivery-a-two-sided-requirement) below — this one is not a single simple grant |
 | `reports-token` | All three | Reads the exact published report (fix/verify: read-only checkout of one path) or pushes new results (scan: write) | Sparse checkout (fix/verify) or `git push` (scan) | Classic: `repo`. Fine-grained: **Contents: Read** (fix/verify) or **Contents: Read and write** (scan) | **Contents: Read** (fix/verify) or **Contents: Read and write** (scan) |
+| `onboarding-token` | [`onboard-repo-branching.yaml`](onboard-repo-branching.yaml) (enterprise-program Wave 1) | Creates/updates a GitHub Ruleset (repository administration); clones, commits, and opens the templates-seeding PR | `POST/PUT /repos/{owner}/{repo}/rulesets`, `GET /repos/{owner}/{repo}/rulesets`, clone+push (git), `POST pulls`, `POST labels` | Classic: `repo` **plus repository admin rights** — Rulesets are an administration operation, materially more privileged than every other role above. Fine-grained: **Administration: Read and write**, **Contents: Read and write**, **Pull requests: Read and write** | Same fine-grained set as the PAT column |
+
+`onboarding-token` is never reused as `scan-token`/`fix-token`/`verify-token`/
+`reports-token` and vice versa — see
+[`config/onboarding/README.md`](../../config/onboarding/README.md) for why this
+role needs Administration access none of the others do, and keep it scoped
+only to repositories actually in an onboarding wave.
 
 `fix-token` and `verify-token` are deliberately separate from `scan-token`
 even though they often point at the same target repo — see

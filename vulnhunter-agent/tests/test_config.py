@@ -286,6 +286,63 @@ aws_api_key = "aws-key-toml"
         assert cfg.anthropic.aws_region == "us-east-2"
         assert cfg.anthropic.aws_api_key == "aws-key-env"
 
+    def test_anthropic_remediation_tiering_defaults(self, tmp_path: Path) -> None:
+        path = tmp_path / "cfg.toml"
+        path.write_text(
+            """
+[anthropic]
+model = "claude-opus-4-8"
+aws_workspace_id = "workspace-toml"
+aws_region = "us-west-2"
+aws_api_key = "aws-key-toml"
+"""
+        )
+        cfg = load_config(path)
+        # Tiering is opt-in: blank remediation_model means fix mode always
+        # uses `model`, unchanged from before this field existed.
+        assert cfg.anthropic.remediation_model == ""
+        assert cfg.anthropic.remediation_escalate_severities == ("High+",)
+
+    def test_anthropic_remediation_tiering_from_toml(self, tmp_path: Path) -> None:
+        path = tmp_path / "cfg.toml"
+        path.write_text(
+            """
+[anthropic]
+model = "claude-opus-4-8"
+aws_workspace_id = "workspace-toml"
+aws_region = "us-west-2"
+aws_api_key = "aws-key-toml"
+remediation_model = "claude-sonnet-5"
+remediation_escalate_severities = ["High+", "High"]
+"""
+        )
+        cfg = load_config(path)
+        assert cfg.anthropic.remediation_model == "claude-sonnet-5"
+        assert cfg.anthropic.remediation_escalate_severities == ("High+", "High")
+
+    def test_anthropic_remediation_escalate_severities_from_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "cfg.toml"
+        path.write_text(
+            """
+[anthropic]
+model = "claude-opus-4-8"
+aws_workspace_id = "workspace-toml"
+aws_region = "us-west-2"
+aws_api_key = "aws-key-toml"
+"""
+        )
+        monkeypatch.setenv(
+            "VULNHUNT_ANTHROPIC_REMEDIATION_ESCALATE_SEVERITIES", "High+,High,Medium"
+        )
+        cfg = load_config(path)
+        assert cfg.anthropic.remediation_escalate_severities == (
+            "High+",
+            "High",
+            "Medium",
+        )
+
     @pytest.mark.parametrize(
         "field",
         ["aws_workspace_id", "aws_region", "aws_api_key"],

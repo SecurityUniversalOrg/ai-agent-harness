@@ -1,0 +1,186 @@
+name: Seed Branching Templates
+description: >
+  Opens a single onboarding PR adding CODEOWNERS, a PR template, and a CI
+  workflow stub to a repository — but only the ones actually missing, and
+  only as a PR a human reviews and merges on their own schedule. Never
+  force-pushes or touches history. Idempotent: re-running finds its own
+  prior onboarding PR (open or already merged) instead of opening a second
+  one.
+
+inputs:
+  owner:
+    required: true
+  repo:
+    required: true
+  token:
+    description: GitHub token with Contents:write and Pull requests:write on the target repository.
+    required: true
+  default-branch:
+    required: true
+  github-host:
+    required: false
+    default: github.com
+  templates-dir:
+    description: Repository-relative (in the *calling* workflow's checkout) directory holding CODEOWNERS.template, PULL_REQUEST_TEMPLATE.md.template, and ci-stub.yml.template.
+    required: false
+    default: config/onboarding
+  pr-branch:
+    required: false
+    default: vulnhunter-onboarding/wave-1-branching
+  pr-labels:
+    required: false
+    default: vulnhunter-onboarding
+
+outputs:
+  action-taken:
+    description: One of "opened", "already-open", "already-merged", "nothing-to-seed".
+    value: ${{ steps.seed.outputs.action-taken }}
+  pr-url:
+    value: ${{ steps.seed.outputs.pr-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Seed missing templates
+      id: seed
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GH_HOST: ${{ inputs.github-host }}
+        OWNER: ${{ inputs.owner }}
+        REPO: ${{ inputs.repo }}
+        DEFAULT_BRANCH: ${{ inputs.default-branch }}
+        TEMPLATES_DIR: ${{ inputs.templates-dir }}
+        PR_BRANCH: ${{ inputs.pr-branch }}
+        PR_LABELS: ${{ inputs.pr-labels }}
+      run: |
+        set -euo pipefail
+
+        [[ -n "${GH_TOKEN}" ]] || { echo "::error::token must not be empty."; exit 64; }
+        echo "::add-mask::${GH_TOKEN}"
+        [[ "${OWNER}" =~ ^[A-Za-z0-9_.-]+$ && "${REPO}" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+          echo "::error::owner/repo contain unsupported characters."
+          exit 64
+        }
+        for f in CODEOWNERS.template PULL_REQUEST_TEMPLATE.md.template ci-stub.yml.template; do
+          [[ -f "${TEMPLATES_DIR}/${f}" ]] || { echo "::error::Missing template: ${TEMPLATES_DIR}/${f}"; exit 64; }
+        done
+
+        # Idempotency: a prior onboarding PR (open, or merged) on this exact
+        # branch name means this repository has already been through this
+        # step — never open a second one.
+        existing_pr="$(gh api "/repos/${OWNER}/${REPO}/pulls?head=${OWNER}:${PR_BRANCH}&state=all" \
+          --jq '.[0].html_url // empty' 2>/dev/null || true)"
+        if [[ -n "${existing_pr}" ]]; then
+          existing_state="$(gh api "/repos/${OWNER}/${REPO}/pulls?head=${OWNER}:${PR_BRANCH}&state=all" \
+            --jq '.[0] | if .merged_at then "merged" elif .state=="open" then "open" else "closed" end')"
+          case "${existing_state}" in
+            open) taken="already-open" ;;
+            merged) taken="already-merged" ;;
+            *) taken="already-open" ;;  # closed-without-merge: still don't reopen automatically
+          esac
+          echo "Onboarding PR already exists for ${OWNER}/${REPO} (${existing_state}): ${existing_pr}"
+          {
+            echo "action-taken=${taken}"
+            echo "pr-url=${existing_pr}"
+          } >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+
+        workdir="$(mktemp -d)"
+        trap 'rm -rf -- "${workdir}"' EXIT
+
+        basic_auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\r\n')"
+        clone_url="https://${GH_HOST}/${OWNER}/${REPO}.git"
+        GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="http.${clone_url}.extraheader" \
+        GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic_auth}" \
+        GIT_TERMINAL_PROMPT=0 \
+          git clone --depth 1 --branch "${DEFAULT_BRANCH}" -- "${clone_url}" "${workdir}/repo"
+        unset basic_auth
+
+        cd "${workdir}/repo"
+
+        missing=()
+        has_codeowners=false
+        for candidate in CODEOWNERS .github/CODEOWNERS docs/CODEOWNERS; do
+          [[ -f "${candidate}" ]] && has_codeowners=true
+        done
+        if [[ "${has_codeowners}" == "false" ]]; then
+          mkdir -p .github
+          cp "${GITHUB_WORKSPACE}/${TEMPLATES_DIR}/CODEOWNERS.template" .github/CODEOWNERS
+          missing+=("CODEOWNERS")
+        fi
+
+        has_pr_template=false
+        for candidate in .github/PULL_REQUEST_TEMPLATE.md .github/pull_request_template.md PULL_REQUEST_TEMPLATE.md; do
+          [[ -f "${candidate}" ]] && has_pr_template=true
+        done
+        if [[ "${has_pr_template}" == "false" ]]; then
+          mkdir -p .github
+          cp "${GITHUB_WORKSPACE}/${TEMPLATES_DIR}/PULL_REQUEST_TEMPLATE.md.template" .github/PULL_REQUEST_TEMPLATE.md
+          missing+=("PR template")
+        fi
+
+        has_workflow=false
+        if [[ -d .github/workflows ]] && find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | grep -q .; then
+          has_workflow=true
+        fi
+        if [[ "${has_workflow}" == "false" ]]; then
+          mkdir -p .github/workflows
+          cp "${GITHUB_WORKSPACE}/${TEMPLATES_DIR}/ci-stub.yml.template" .github/workflows/ci.yml
+          missing+=("CI workflow stub")
+        fi
+
+        if (( ${#missing[@]} == 0 )); then
+          echo "Nothing to seed on ${OWNER}/${REPO}; all onboarding templates already present."
+          {
+            echo "action-taken=nothing-to-seed"
+            echo "pr-url="
+          } >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+
+        git checkout -b "${PR_BRANCH}"
+        git -c user.name="VulnHunter Onboarding" \
+            -c user.email="vulnhunter-onboarding@users.noreply.github.com" \
+            add .github
+        git -c user.name="VulnHunter Onboarding" \
+            -c user.email="vulnhunter-onboarding@users.noreply.github.com" \
+            commit -m "Onboarding: seed $(IFS=,; echo "${missing[*]}")" -q
+
+        basic_auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\r\n')"
+        GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="http.${clone_url}.extraheader" \
+        GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic_auth}" \
+        GIT_TERMINAL_PROMPT=0 \
+          git push -u origin "${PR_BRANCH}"
+        unset basic_auth
+
+        body=$'This PR was opened automatically by the VulnHunter Enterprise Program\nonboarding pipeline (Wave 1 — branching strategy). It never force-pushes\nand never touches your existing history; review and merge on your own\nschedule, or close it if your team already has an equivalent in place.\n\n**Seeded in this PR:**\n'
+        for item in "${missing[@]}"; do
+          body+="- ${item}"$'\n'
+        done
+        body+=$'\nSee [rollout plan §3.3](https://github.com/SecurityUniversalOrg/ai-agent-harness/blob/main/docs/enterprise-program/03-rollout-plan.md#33-branching-strategy-onboarding-wave-1) for context.'
+
+        # gh pr create --label fails outright if the label doesn't exist yet
+        # on this repository; create it first, tolerating "already exists".
+        gh label create "${PR_LABELS}" \
+          --repo "${OWNER}/${REPO}" \
+          --color "0E8A16" \
+          --description "Opened by the VulnHunter Enterprise Program onboarding pipeline" \
+          >/dev/null 2>&1 || true
+
+        pr_url="$(gh pr create \
+          --repo "${OWNER}/${REPO}" \
+          --base "${DEFAULT_BRANCH}" \
+          --head "${PR_BRANCH}" \
+          --title "VulnHunter onboarding: seed $(IFS=,; echo "${missing[*]}")" \
+          --body "${body}" \
+          --label "${PR_LABELS}" 2>&1 | tail -n1)"
+
+        echo "Opened onboarding PR for ${OWNER}/${REPO}: ${pr_url}"
+        {
+          echo "action-taken=opened"
+          echo "pr-url=${pr_url}"
+        } >> "${GITHUB_OUTPUT}"

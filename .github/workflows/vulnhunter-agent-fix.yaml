@@ -37,7 +37,7 @@ on:
           - api_key
           - aws_role
       model:
-        description: Reviewed remediation model
+        description: Reviewed remediation model, or 'auto' to let remediation_model/report severity pick per run
         required: true
         default: claude-opus-4-8
         type: choice
@@ -45,6 +45,17 @@ on:
           - claude-opus-4-7
           - claude-opus-4-8
           - claude-mythos-5
+          - auto
+      remediation_model:
+        description: Cheaper model used when model=auto and report severity doesn't require escalation (blank disables tiering)
+        required: false
+        default: ""
+        type: string
+      remediation_escalate_severities:
+        description: Comma-separated report severities that force the escalated model even under model=auto
+        required: false
+        default: "High+"
+        type: string
       mythos_retention_acknowledged:
         description: Acknowledge mandatory 30-day Mythos request retention (no ZDR); ignored for Opus models
         required: false
@@ -100,6 +111,14 @@ on:
       model:
         required: false
         default: claude-opus-4-8
+        type: string
+      remediation_model:
+        required: false
+        default: ""
+        type: string
+      remediation_escalate_severities:
+        required: false
+        default: "High+"
         type: string
       mythos_retention_acknowledged:
         required: false
@@ -356,6 +375,8 @@ jobs:
           report-directory: ${{ steps.prepare.outputs.report-directory }}
           scratch-base: ${{ steps.prepare.outputs.scratch-base }}
           model: ${{ inputs.model }}
+          remediation-model: ${{ inputs.remediation_model }}
+          remediation-escalate-severities: ${{ inputs.remediation_escalate_severities }}
           mythos-retention-acknowledged: ${{ inputs.mythos_retention_acknowledged }}
           anthropic-auth-mode: ${{ inputs.anthropic_auth_method }}
           aws-workspace-id: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}

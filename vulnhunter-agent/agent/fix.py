@@ -400,6 +400,69 @@ def _validate_semantics(
     return ""
 
 
+# Enterprise-program model tiering (docs/enterprise-program/02-reference-
+# architecture.md §2.3.2). Report severity vocabulary from the summary table
+# in vulnhunt/phases/phase4_report.md, most severe first.
+_REPORT_SEVERITY_ORDER: tuple[str, ...] = ("High+", "High", "Medium", "Low", "Informational")
+
+
+def _detect_max_report_severity(report: Path) -> str | None:
+    """Best-effort severity heuristic over a staged results directory's README.
+
+    Regex-matches the report's own severity vocabulary ("High+"/"High"/
+    "Medium"/"Low"/"Informational") against summary-table rows in README.md
+    and returns the single most severe token found, or ``None`` if none
+    matched.
+
+    This is a heuristic, not a parser: it does not validate table structure
+    and cannot fully distinguish a finding's severity column from the same
+    word appearing elsewhere. It feeds only the fix-mode model-tier choice
+    below — a wrong guess costs an avoidable model upgrade/downgrade, never
+    a change to what the remediation skill itself verifies or delivers.
+    """
+    try:
+        text = (report / "README.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # Only consider table-row-shaped lines ("| VULN-NNN | ... |") to reduce
+    # false positives from prose mentioning severity words elsewhere.
+    row_pattern = re.compile(r"^\|\s*VULN-\d+\s*\|.*\|\s*$", re.MULTILINE)
+    rows = "\n".join(row_pattern.findall(text))
+    for severity in _REPORT_SEVERITY_ORDER:
+        # "High+" ends in a non-word character, where \b never matches
+        # between it and an adjacent non-word character (e.g. a following
+        # space) — treat "+" as a token character on both sides instead, so
+        # "High" cannot match as a substring of "High+" (checked first, so a
+        # false substring match would otherwise mask the real severity).
+        pattern = rf"(?<![\w+]){re.escape(severity)}(?![\w+])"
+        if re.search(pattern, rows):
+            return severity
+    return None
+
+
+def select_fix_model(config: AgentConfig, severity_hint: str | None) -> str:
+    """Choose the model an untiered (``model_override``-less) fix run should use.
+
+    Returns ``config.anthropic.model`` when tiering is disabled
+    (``remediation_model`` blank — the default, unchanged behavior), when
+    ``severity_hint`` is in ``remediation_escalate_severities``, or when
+    severity could not be determined at all (fail toward the more capable
+    model, not toward cost). Otherwise returns ``remediation_model``.
+
+    Never consulted when the caller supplies an explicit ``model_override``
+    (CLI ``--model`` / workflow ``model`` input other than ``auto``) — an
+    explicit operator choice always wins over automatic tiering.
+    """
+    if not config.anthropic.remediation_model:
+        return config.anthropic.model
+    if (
+        severity_hint is None
+        or severity_hint in config.anthropic.remediation_escalate_severities
+    ):
+        return config.anthropic.model
+    return config.anthropic.remediation_model
+
+
 async def run_fix(
     *,
     config: AgentConfig,
@@ -467,6 +530,20 @@ async def run_fix(
     except (FixInputError, RuntimeError, OSError) as exc:
         logger.error("Could not stage fix report: %s", exc)
         return _EXIT_FAILURE
+
+    # Enterprise-program model tiering: an explicit model_override (operator
+    # --model, or a workflow `model` input other than "auto") always wins.
+    # Only when the caller leaves model selection open does config-driven
+    # tiering (AnthropicConfig.remediation_model) get a say.
+    effective_model = model_override
+    if effective_model is None:
+        severity_hint = _detect_max_report_severity(report)
+        effective_model = select_fix_model(config, severity_hint)
+        logger.info(
+            "Fix model tiering: severity=%s -> model=%s",
+            severity_hint or "unknown",
+            effective_model,
+        )
 
     target_checkout: Path | None = None
     if target_checkout_override is not None:
@@ -542,7 +619,7 @@ async def run_fix(
         log_path=run_dir / "agent.log",
         runtime_config=runtime_config_path,
         skill_dir=skill_dir,
-        model_override=model_override,
+        model_override=effective_model,
         delivery_enabled=not no_post,
     )
     if result.kind is not FixOutputKind.DISPOSITION or result.parsed is None:

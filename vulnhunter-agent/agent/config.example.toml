@@ -49,6 +49,19 @@ auth_mode = "anthropic_aws"
 # claude-opus-4-8, and claude-mythos-5. Override per invocation with --model.
 model = "claude-opus-4-8"
 
+# --- fix-mode model tiering (enterprise-program extension; optional) ---
+# Cheaper model fix mode uses by default instead of `model`. Blank (default)
+# disables tiering entirely: fix mode always uses `model`, unchanged from
+# before this setting existed. See
+# docs/enterprise-program/02-reference-architecture.md §2.3.2.
+remediation_model = ""
+# Report severity tokens ("High+", "High", "Medium", "Low", "Informational" —
+# the report's own vocabulary, see vulnhunt/phases/phase4_report.md) that
+# route a fix run to `model` instead of `remediation_model` even when
+# remediation_model is set. Comma-separated. Default: only the most severe
+# tier escalates.
+remediation_escalate_severities = ["High+"]
+
 # --- anthropic_aws mode ---
 # Workspace and API key issued for Claude Platform on AWS. Claude Code receives
 # these as ANTHROPIC_AWS_WORKSPACE_ID and ANTHROPIC_AWS_API_KEY.
